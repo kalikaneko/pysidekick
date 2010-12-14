@@ -12,7 +12,7 @@ cooperation with the Qt event loop.  We have:
     * qCallAfter:   call function after current event has been processed
     * qCallLater:   call function after sleeping for some interval
     * qCallInMainThread:   (blockingly) call function in the main GUI thread
-    * qCallInWorkerThread:   (asynchronously) call function in worker thread
+    * qCallInWorkerThread:   (nonblockingly) call function in worker thread
 
 
 There is also a decorator to apply these helpers to all calls to a function:
@@ -28,12 +28,7 @@ from functools import wraps
 import Queue
 
 import PySideKick
-from PySideKick import QtCore
-
-
-#  I can't work out how to extract the main thread from a running PySide app.
-#  Until then, we assue that whoever imports this module is the main thread.
-_MAIN_THREAD_ID = thread.get_ident()
+from PySideKick import QtCore, qIsMainThread
 
 
 class qCallAfter(QtCore.QObject):
@@ -41,7 +36,7 @@ class qCallAfter(QtCore.QObject):
 
     This helper arranges for the given function to be called on a subsequent
     iteration of the main event loop.  It's most useful inside event handlers,
-    where you may want to defer some work unti after the event has finished
+    where you may want to defer some work until after the event has finished
     being processed.
 
     The implementation is as a singleton QObject subclass.  It maintains a
@@ -62,23 +57,38 @@ class qCallAfter(QtCore.QObject):
             self._popCall()
 
     def __call__(self,func,*args,**kwds):
-        if self.app is None:
-            app = QtCore.QCoreApplication.instance()
-            if app is None:
-                self.pending_func_queue.put((func,args,kwds))
-            else:
-                self.app = app
-                try:
-                    while True:
-                        self.func_queue.put(self.pending_func_queue.get(False))
-                        self._postEvent()
-                except Queue.Empty:
-                    pass
-                self.func_queue.put((func,args,kwds))
-                self._postEvent()
-        else:
+        global qCallAfter
+        #  If the app is running, dispatch the event directly.
+        if self.app is not None:
             self.func_queue.put((func,args,kwds))
             self._postEvent()
+            return
+        #  Otherwise, we have some bootstrapping to do!
+        #  Before dispatching, there must be a running app and we must
+        #  be on the same thread as it.
+        app = QtCore.QCoreApplication.instance()
+        if app is None or not qIsMainThread():
+            self.pending_func_queue.put((func,args,kwds))
+            return
+        #  This is the first call with a running app and from the 
+        #  main thread.  If it turns out we're not on the main thread,
+        #  replace ourselves with a fresh instance.
+        if hasattr(self,"thread"):
+            if self.thread() is not QtCore.QThread.currentThread():
+                qCallAfter = self.__class__()
+            else:
+                self.app = app
+        else:
+            self.app = app
+        #  OK, we now have the official qCallAfter instance.
+        #  Flush all pending events.
+        try:
+            while True:
+                (pfunc,pargs,pkwds) = self.pending_func_queue.get(False)
+                qCallAfter(pfunc,*pargs,**pkwds)
+        except Queue.Empty:
+            pass
+        qCallAfter(func,*args,**kwds)
 
     def _popCall(self):
         (func,args,kwds) = self.func_queue.get(False)
@@ -90,22 +100,30 @@ class qCallAfter(QtCore.QObject):
             self.app.postEvent(self,event)
         except RuntimeError:
             #  This can happen if the app has been destroyed.
-            #  Empty the queue.
+            #  Immediately empty the queue.
             try:
                 while True:
                     self._popCall()
             except Queue.Empty:
                 pass
 
-#  Things could get a little tricky here.  The object must belong to the
-#  same thread as the QApplication.  For now we assume that this module
-#  has been imported from the main thread.
+#  Optimistically create the singleton instance of qCallAfter.
+#  If this module is imported from a non-gui thread then this instance will
+#  eventually be replaced, but usually it'll be the correct one.
 qCallAfter = qCallAfter()
 
 
 
 class Future(object):
-    """Primative "future" class, for executing functions in another thread."""
+    """Primative "future" class for executing functions in another thread.
+
+    Instances of this class represent a compuation sent to another thread.
+    Call the "get_result" method to wait until completion and get the result
+    (or raise the exception).
+
+    Existing Future objects are recycled to avoid the overhead of allocating
+    a new lock primitive for each async call.
+    """
 
     _READY_INSTANCES = []
 
@@ -147,15 +165,18 @@ class Future(object):
         finally:
             self.recycle()
 
+    def is_ready(self):
+        return self.read.isSet()
+
 
 def qCallInMainThread(func,*args,**kwds):
-    """Synchronosly call the given function in the main thread.
+    """Synchronously call the given function in the main thread.
 
     This helper arranges for the given function to be called in the main
     event loop, then blocks and waits for the result.  It's a simple way to
     call functions that manipulate the GUI from a non-GUI thread.
     """
-    if thread.get_ident() == PySideKick._MAIN_THREAD_ID:
+    if qIsMainThread():
         func(*args,**kwds)
     else:
         future = Future.get_or_create()
@@ -171,7 +192,7 @@ def qCallInWorkerThread(func,*args,**kwds):
     spawns a new background thread.
 
     If you need to know the result of the function call, this helper returns
-    a Future object; use f.ready.isSet() to test whether it's ready and call
+    a Future object; use f.is_ready() to test whether it's ready and call
     f.get_result() to get the return value or raise the exception.
     """
     future = Future.get_or_create()

@@ -31,7 +31,23 @@ from PySide import QtCore, QtGui
 from PySide.QtCore import Qt
 
 
-#  I can't work out how to extract the main thread from a running PySide app.
-#  Until then, we assue that whoever imports this module is the main thread.
-_MAIN_THREAD_ID = thread.get_ident()
+#  Older versions of PySide don't expose the 'thread' attribute of QObject.
+#  In this case, assume the thread importing this module is the main thread.
+if hasattr(QtCore.QCoreApplication,"thread"):
+    def qIsMainThread():
+        app = QtCore.QCoreApplication.instance()
+        if app is None:
+            return False
+        return QtCore.QThread.currentThread() is app.thread()
+else:
+    _MAIN_THREAD_ID = thread.get_ident()
+    def qIsMainThread():
+        return thread.get_ident() == _MAIN_THREAD_ID
+
+
+#  PySideKick.Call needs to create a singleton object in the main gui thread.
+#  Since this is *usually* the thread that imports this module, loading it here
+#  will provide a small speedup in the common case.
+import PySideKick.Call
+
 
