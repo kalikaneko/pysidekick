@@ -83,12 +83,19 @@ class TypeSystemTrimmer(object):
                         "QGraphicsLayoutItem","QFactoryInterface",
                         "QGraphicsLayout","QImageIOHandler","QInputContext",
                         "QItemEditorCreatorBase","QLayoutItem","QLayout",
-                        "QPaintDevice","QPixmap",)
+                        "QPaintDevice","QPaintEngine","QPyTextObject",
+                        "QStyle","QSyntaxHighlighter","QTextObjectInterface",
+                        "QValidator","QGestureRecognizer","QGraphicsEffect",
+                        "QGraphicsTransform","QPrintEngine",)
 
     #  List of classes that the hand-written PySide bindings modify.
     #  Rejecting these disrupts the hand-written bindings, so we don't
     #  reject them until we can work out a way forward.
     MODIFIED_CLASSES = ("QItemSelection",)
+
+    #  I need to work out some pointer casting magic that breaks
+    #  when I reject methods from these classes.
+    VALUE_CLASSES = ("QPixmap","QImage","QPicture",)
 
     def __init__(self,mf=None):
         if mf is None:
@@ -141,6 +148,8 @@ class TypeSystemTrimmer(object):
             if classnm in self.ABSTRACT_CLASSES:
                 continue
             if classnm in self.MODIFIED_CLASSES:
+                continue
+            if classnm in self.VALUE_CLASSES:
                 continue
             classobj = getattr(mod,classnm)
             #  If it's not a shiboken object, don't bother.
