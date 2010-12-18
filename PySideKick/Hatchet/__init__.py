@@ -90,7 +90,7 @@ class Hatchet(object):
             self.build_pyside_source(sourcedir)
             self.copy_hacked_pyside_modules(sourcedir,self.appdir)
         finally:
-            pass #shutil.rmtree(tdir)
+            shutil.rmtree(tdir)
 
     def add_script(self,pathname):
         """Add an additional script for the frozen application.
@@ -543,6 +543,18 @@ class Hatchet(object):
         olddir = os.getcwd()
         os.chdir(sourcedir)
         try:
+            #  Here we have some more tricks for getting smaller binaries:
+            #     * CMAKE_BUILD_TYPE=MinSizeRel, to enable -Os
+            #     * -fno-exceptions, to skip generation of stack-handling code
+            #  We also try to use compiler options from python so that the
+            #  libs will match as closely as possible.
+            env = os.environ.copy()
+            env.setdefault("CC",sysconfig.get_config_var("CC"))
+            env.setdefault("CXX",sysconfig.get_config_var("CXX"))
+            cxxflags = sysconfig.get_config_var("CFLAGS")
+            cxxflags += " " + env.get("CXXFLAGS","")
+            cxxflags += " -fno-exceptions"
+            env["CXXFLAGS"] = cxxflags
             subprocess.check_call((
                 "cmake",
                 "-DCMAKE_BUILD_TYPE=MinSizeRel",
@@ -550,17 +562,35 @@ class Hatchet(object):
                 "-DBUILD_TESTS=False",
                 "-DPYTHON_EXECUTABLE="+sys.executable,
                 "-DPYTHON_INCLUDE_DIR="+sysconfig.get_python_inc()
-            ))
+            ),env=env)
             subprocess.check_call((
                 "make",
-            ))
+            ),env=env)
         finally:
             os.chdir(olddir)
 
     def copy_hacked_pyside_modules(self,sourcedir,destdir):
         """Copy PySide modules from build dir back into the frozen app."""
-        pass
-
+        #  Find all the build modules we're able to copy over
+        psdir = os.path.join(sourcedir,"PySide")
+        modules = []
+        for modnm in os.listdir(psdir):
+            if modnm.startswith("Qt"):
+                if modnm.endswith(".so") or modnm.endswith(".pyd"):
+                    modules.append(modnm)
+        #  Search for similarly-named files in the destdir and replace them
+        for (dirnm,_,filenms) in os.walk(destdir):
+            for filenm in filenms:
+                filepath = os.path.join(dirnm,filenm)
+                if not filenm.endswith(".so") and not filenm.endswith(".pyd"):
+                    continue
+                if "PySide" not in filepath:
+                    continue
+                for modnm in modules:
+                    if filepath.endswith(modnm):
+                        print "REPLACING", filepath, "WITH", modnm
+                        os.unlink(filepath)
+                        shutil.copy2(os.path.join(psdir,modnm),filepath)
 
 
 def hack(appdir):
