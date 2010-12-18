@@ -2,5 +2,6 @@
 
   Hatchet:
 
-     * extract ISYSROOT from the python build config
+      * try to build against a static Qt, see how much that lets
+        us strip out of the combined binary size
 
