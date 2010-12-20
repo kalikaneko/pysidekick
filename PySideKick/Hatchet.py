@@ -620,10 +620,61 @@ class Hatchet(object):
                     continue
                 for modnm in modules:
                     if filepath.endswith(modnm):
+                        newfilepath = os.path.join(psdir,modnm)
+                        self.copy_linker_paths(filepath,newfilepath)
                         print "REPLACING", filepath, "WITH", modnm
                         os.unlink(filepath)
-                        shutil.copy2(os.path.join(psdir,modnm),filepath)
+                        shutil.copy2(newfilepath,filepath)
 
+    if sys.platform == "darwin":
+        def copy_linker_paths(self,srcfile,dstfile):
+            srclinks = _bt("otool","-L",srcfile).strip().split("\n")
+            dstlinks = _bt("otool","-L",dstfile).strip().split("\n")
+            for dstlink in dstlinks:
+                if "compatibility version" not in dstlink:
+                    continue
+                dstlibpath = dstlink.strip().split()[0]
+                dstlibname = os.path.basename(dstlibpath)
+                for srclink in srclinks:
+                    if "compatibility version" not in srclink:
+                        continue
+                    srclibpath = srclink.strip().split()[0]
+                    srclibname = os.path.basename(srclibpath)
+                    if srclibname == dstlibname:
+                        _do("install_name_tool","-change",
+                            dstlibpath,srclibpath,dstfile)
+                        break
+    elif "linux" in sys.platform:
+        def copy_linker_paths(self,srcfile,dstfile):
+            rpath = None
+            for ln in _bt("readelf","-d",srcfile):
+                if "RPATH" in ln and "Library rpath:" in ln:
+                    rpath = ln.rsplit("[",1).split("]",0)
+                    break
+            if rpath is not None:
+                do("patchelf","--set-rpath",rpath,dstfile)
+    else:
+        def copy_linker_paths(self,srcfile,dstfile):
+            pass
+
+
+
+def _do(*cmdline):
+    subprocess.check_call(cmdline)
+
+
+def _bt(*cmdline):
+    """Execute the command, returning stdout.
+
+    "bt" is short for "backticks"; hopefully its use is obvious to shell
+    scripters and the like.
+    """
+    p = subprocess.Popen(cmdline,stdout=subprocess.PIPE)
+    output = p.stdout.read()
+    retcode = p.wait()
+    if retcode != 0:
+        raise subprocess.CalledProcessError(retcode,cmdline)
+    return output
 
 
 class TypeDB(object):
