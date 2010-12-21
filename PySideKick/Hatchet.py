@@ -56,8 +56,8 @@ from distutils import sysconfig
 
 
 #  Download details for the latest PySide release.
-PYSIDE_SOURCE_URL = "http://www.pyside.org/files/pyside-qt4.7+1.0.0~beta1.tar.bz2"
 PYSIDE_SOURCE_MD5 = "73ab2b92c66c86bedabc72481ed00868"
+PYSIDE_SOURCE_URL = "http://www.pyside.org/files/pyside-qt4.7+1.0.0~beta1.tar.bz2"
 
 
 #  Classes that must not be hacked out of the PySide binary.
@@ -68,6 +68,9 @@ KEEP_CLASSES = set((
     "QFlag",
     "QFlags",
     "QBuffer",
+    "QVariant",
+    "QByteArray",
+    "QLayout",    #  used by glue code for QWidget
 ))
 
 
@@ -81,10 +84,10 @@ KEEP_METHODS = {
     "QBitArray": ("setBit",),
     "QByteArray": ("insert",),
     # there's some pointer casting magic that breaks when rejecting these
-    "QPixmap": ("*",),
-    "QImage": ("*",),
-    "QPicture": ("*",),
-    "QX11Info": ("*",),
+    #"QPixmap": ("*",),
+    #"QImage": ("*",),
+    #"QPicture": ("*",),
+    #"QX11Info": ("*",),
 }
 
 
@@ -119,6 +122,7 @@ class Hatchet(object):
             sourcefile = self.fetch_pyside_source()
             sourcedir = self.unpack_tarball(sourcefile,tdir)
             self.hack_pyside_source(sourcedir)
+            sys.stdout.flush()
             self.build_pyside_source(sourcedir)
             self.copy_hacked_pyside_modules(sourcedir,self.appdir)
         finally:
@@ -187,6 +191,17 @@ class Hatchet(object):
                     self._add_pyc_file(subpath,fqname)
                 elif nm.endswith(".zip"):
                     self.add_zipfile(subpath)
+                elif nm.endswith(".exe"):
+                    try:
+                        self.add_zipfile(subpath)
+                    except (zipfile.BadZipfile,):
+                        pass
+                else:
+                    try:
+                        if "executable" in _bt("file",subpath):
+                            self.add_zipfile(subpath)
+                    except (EnvironmentError,zipfile.BadZipfile,):
+                        pass
 
     def _add_py_file(self,pathname,pkgname):
         """Add an additional python source file for the frozen application.
@@ -233,7 +248,7 @@ class Hatchet(object):
         #  and all of their base classes.
         useful_classes = set()
         for classnm in self.tdb.iterclasses():
-            if classnm in used_ids:
+            if classnm in used_ids or classnm in KEEP_CLASSES:
                 for sclassnm in self.tdb.superclasses(classnm):
                     if sclassnm not in useful_classes:
                         print "USEFUL CLASS", repr(sclassnm)
@@ -246,7 +261,7 @@ class Hatchet(object):
             print "CHECKING", classnm, "[", len(todo_classes), "more to do ]"
             kept_methods = set(self.find_kept_methods(classnm))
             for methnm in self.tdb.itermethods(classnm):
-                if methnm in used_ids or methnm in kept_methods:
+                if methnm in used_ids or methnm in kept_methods or methnm+"_" in used_ids:
                     print "CHECKING", classnm, methnm
                     for rtype in self.tdb.relatedtypes(classnm,methnm):
                         for sclassnm in self.tdb.superclasses(rtype):
@@ -263,6 +278,8 @@ class Hatchet(object):
                 kept_methods = set(self.find_kept_methods(classnm))
                 for methnm in self.tdb.itermethods(classnm):
                     if methnm in used_ids:
+                        continue
+                    if methnm+"_" in used_ids:
                         continue
                     if methnm in kept_methods:
                         continue
@@ -585,8 +602,12 @@ class Hatchet(object):
             env.setdefault("CXX",sysconfig.get_config_var("CXX"))
             cxxflags = sysconfig.get_config_var("CFLAGS")
             cxxflags += " " + env.get("CXXFLAGS","")
-            cxxflags += " -fno-exceptions"
+            cxxflags += " -fno-exceptions -Wl,--gc-sections"
             env["CXXFLAGS"] = cxxflags
+            ldflags = sysconfig.get_config_var("LDFLAGS")
+            ldflags += " " + env.get("LDFLAGS","")
+            ldflags += " --gc-sections -lpthread -lrt -lz -ldl -lQtNetwork -lQtCore -ljpeg -ltiff -lpng14 -lz -lX11 -lXrender -lXrandr -lXext -lfontconfig -lSM -lICE"
+            env["LDFLAGS"] = ldflags
             subprocess.check_call((
                 "cmake",
                 "-DCMAKE_BUILD_TYPE=MinSizeRel",
@@ -625,6 +646,7 @@ class Hatchet(object):
                         print "REPLACING", filepath, "WITH", modnm
                         os.unlink(filepath)
                         shutil.copy2(newfilepath,filepath)
+                        _do("strip",filepath)
 
     if sys.platform == "darwin":
         def copy_linker_paths(self,srcfile,dstfile):
@@ -782,9 +804,13 @@ class TypeDB(object):
 
     def iterclasses(self):
         """Iterator over all available class names."""
+        #  This is a make-believe class create just for python.
+        yield "QPyTextObject"
+        yield "QAbstractPageSetupDialog"
         #  These classes seem to be missing from the online docs.
         #  They are in the docs on the PySide website, I should probably
         #  move to parsing those instead.
+        yield "QAbstractPageSetupDialog"
         yield "QTextStreamManipulator"
         yield "QScriptExtensionInterface"
         #  Everything else is conventienly listed on the "classes" page.
@@ -798,6 +824,10 @@ class TypeDB(object):
 
     def isclass(self,classnm):
         """Check whether the given name is indeed a class."""
+        if classnm == "QPyTextObject":
+            return True
+        if classnm == "QAbstractPageSetupDialog":
+            return True
         if classnm == "QTextStreamManipulator":
             return True
         if classnm == "QScriptExtensionInterface":
@@ -814,6 +844,16 @@ class TypeDB(object):
     def superclasses(self,classnm):
         """Get all superclasses for a given class."""
         yield classnm
+        if classnm == "QPyTextObject":
+            yield "QTextObjectInterface"
+            yield "QObject"
+            return
+        if classnm == "QAbstractPageSetupDialog":
+            yield "QDialog"
+            yield "QWidget"
+            yield "QPaintDevice"
+            yield "QObject"
+            return
         docstr = self._read_url(classnm.lower()+".html")
         for ln in docstr.split("\n"):
             ln = ln.strip()
@@ -826,6 +866,10 @@ class TypeDB(object):
     def subclasses(self,classnm):
         """Get all subclasses for a given class."""
         yield classnm
+        if classnm == "QPyTextObject":
+            return
+        if classnm == "QAbstractPageSetupDialog":
+            return
         docstr = self._read_url(classnm.lower()+".html")
         for ln in docstr.split("\n"):
             ln = ln.strip()
@@ -844,6 +888,17 @@ class TypeDB(object):
             yield "encodeData"
         if classnm == "QScriptExtensionInterface":
             yield "initialize"
+            return
+        if classnm == "QPyTextObject":
+            for methnm in self.itermethods("QObject"):
+                yield methnm
+            for methnm in self.itermethods("QTextObjectInterface"):
+                yield methnm
+            return
+        if classnm == "QAbstractPageSetupDialog":
+            yield "printer"
+            for methnm in self.itermethods("QDialog"):
+                yield methnm
             return
         docstr = self._read_url(classnm.lower()+"-members.html")
         for ln in docstr.split("\n"):
@@ -864,6 +919,21 @@ class TypeDB(object):
             if methnm in ("decodeData","encodeData",):
                 yield "QModelIndexList"
                 yield "QDataStream"
+            return
+        if classnm == "QPyTextObject":
+            if methnm in ("drawObject","intrinsicSize",):
+                for rel in self.relatedtypes("QTextObjectInterface",methnm):
+                    yield rel
+            else:
+                for rel in self.relatedtypes("QObject",methnm):
+                    yield rel
+            return
+        if classnm == "QAbstractPageSetupDialog":
+            if methnm in ("printer",):
+                yield "QPrinter"
+            else:
+                for rel in self.relatedtypes("QDialog",methnm):
+                    yield rel
             return
         if classnm == "QScriptExtensionInterface":
             if methnm in ("initialize",):
@@ -889,6 +959,14 @@ class TypeDB(object):
 
     def ispurevirtual(self,classnm,methnm):
         """Check whether a given method is a pure virtual method."""
+        if classnm == "QPyTextObject":
+            if methnm in ("drawObject","intrinsicSize",):
+                return True
+            return False
+        if classnm == "QAbstractPageSetupDialog":
+            if methnm in ("printer",):
+                return True
+            return False
         #  Pure virtual methods have a "= 0" at the end of their signature.
         docstr = self._read_url(classnm.lower()+".html")
         for ln in docstr.split("\n"):
