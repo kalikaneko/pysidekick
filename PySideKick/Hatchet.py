@@ -3,7 +3,6 @@
 PySideKick.Hatchet:  hack frozen PySide apps down to size
 =========================================================
 
-
 Hatchet is a tool for reducing the size of frozen PySide applications, by
 re-building the PySide binaries to include only those classes and functions
 that are actually used by the application.
@@ -27,11 +26,26 @@ will take a while.  Here are the things Hatchet will do to your frozen app:
     * build the new PySide binaries and insert them into the application.
 
 The result can be a substantial reduction in the frozen application size.
-I've seen a reduction of over 10 megabytes against a naively-compiled
+I've seen the size drop by more than half compared to a naively-compiled
 PySide binary.
 
 For finer control over the details of the binary-hacking process, you can
 use and customize the "Hatchet" class.  See its docstring for more details.
+
+In order to successfully rebuild the PySide binary, you *must* have the
+necessary build environment up and running.  This includes the Qt libraries
+and development files, cmake, and the shiboken bindings generator.  If
+these are installed in a non-standard location, you can set the environment
+variable CMAKE_INSTALL_PREFIX to let Hatchet find them.
+
+See the following pages for how to build PySide from source:
+
+    http://developer.qt.nokia.com/wiki/Building_PySide_on_Linux
+    http://developer.qt.nokia.com/wiki/Building_PySide_on_Windows
+    http://developer.qt.nokia.com/wiki/Building_PySide_on_Mac_OS_X
+
+If you need to customize the build process, make a subclass of Hatchet and
+override the "build_pyside_source" method.
 
 """
 
@@ -50,14 +64,15 @@ import urllib
 import urllib2
 import hashlib
 import subprocess
+import logging
 from xml.dom import minidom
 from collections import deque
 from distutils import sysconfig
 
 
 #  Download details for the latest PySide release.
-PYSIDE_SOURCE_MD5 = "73ab2b92c66c86bedabc72481ed00868"
-PYSIDE_SOURCE_URL = "http://www.pyside.org/files/pyside-qt4.7+1.0.0~beta1.tar.bz2"
+PYSIDE_SOURCE_MD5 = "71869b10d0562d8f5a2761d2fb298677"
+PYSIDE_SOURCE_URL = "http://www.pyside.org/files/pyside-qt4.7+1.0.0~beta2.tar.bz2"
 
 
 #  Classes that must not be hacked out of the PySide binary.
@@ -70,25 +85,33 @@ KEEP_CLASSES = set((
     "QBuffer",
     "QVariant",
     "QByteArray",
-    "QLayout",    #  used by glue code for QWidget
+    "QLayout",    #  used by glue code for QWidget. Can we remove it somehow?
+    "QDeclarativeItem",  # used internally by QtDeclarative
 ))
 
 
 #  Methods that must not be hacked off of various objects.
 #  Mostly this is voodoo to stop things from segfaulting.
 KEEP_METHODS = {
-    "*": ("metaObject",  # much breakage ensues if this is missing!
-          "devType",     # rejecting this segfaults on by linux box
-          "metric",      # without this fonts don't display correctly
-         ),
-    "QBitArray": ("setBit",),
-    "QByteArray": ("insert",),
-    # there's some pointer casting magic that breaks when rejecting these
+    "*": set(("metaObject",  # much breakage ensues if this is missing!
+              "devType",     # rejecting this segfaults on by linux box
+              "metric",      # without this fonts don't display correctly
+         )),
+    "QBitArray": set(("setBit",)),
+    "QByteArray": set(("insert",)),
     #"QPixmap": ("*",),
     #"QImage": ("*",),
     #"QPicture": ("*",),
     #"QX11Info": ("*",),
 }
+
+#  These are protected methods, and win32 can't use the "protected hack"
+#  to access them so we are forced to generate the bindings.
+if sys.platform == "win32":
+    KEEP_METHODS["QObject"] = set((
+        "connectNotify",
+        "disconnectNotify",
+    ))
 
 
 #  Simple regular expression for matching valid python identifiers.
@@ -97,16 +120,57 @@ is_identifier = _identifier_re.match
 
 
 class Hatchet(object):
-    """Class for hacking unused code out of the PySide binaries."""
+    """Class for hacking unused code out of the PySide binaries.
 
-    def __init__(self,appdir,mf=None,tdb=None):
+    A Hatchet object controls what and how to hack things out of the PySide
+    binaries for a frozen module.  It must be given a path to a directory
+    containing a frozen PySide application.  When you call the hack() method
+    it will:
+
+        * extract all the identifiers used throughout the application.
+        * from this, calculate the set of all PySide classes and methods
+          that the application might refer to.
+        * download and unpack the latest PySide sources.
+        * hack the PySide sources to build only those classes and methods
+          used by the application.
+        * configure the PySide sources with some additional tricks to reduce
+          the final size of the binaries
+        * build the new PySide binaries and insert them into the application.
+
+    You can customize the behaviour of the Hatchet by adjusting the following
+    attributes:
+
+        * mf:             a ModuleFinder object used to locate the app's code.
+        * typedb:         a TypeDB instance used to get information about
+                          the classes and methods available in PySide.
+        * keep_classes:   a set of class names that must not be removed.
+        * keep_methods:   a dict maaping class names to methods on those 
+                          classes that must not be removed.
+
+    You can adjust the modules searched for Qt identifiers by calling
+    the following methods:
+
+        * add_file:        directly add a *.py or *.pyc file
+        * add_directory:   add the entire contents of a directory
+        * add_zipfile:     add the entire contents of a zipfile
+
+    If you don't call any of these methods, the contents of the given appdir
+    will be used.
+    """
+
+    def __init__(self,appdir,mf=None,typedb=None,logger=None):
         self.appdir = appdir
         if mf is None:
             mf = modulefinder.ModuleFinder()
         self.mf = mf
-        if tdb is None:
-            tdb = TypeDB()
-        self.tdb = tdb
+        if logger is None:
+            logger = logging.getLogger("PySideKick.Hatchet")
+        self.logger = logger
+        if typedb is None:
+            typedb = TypeDB(logger=self.logger)
+        self.typedb = typedb
+        self.keep_classes = set()
+        self.keep_methods = {}
 
     def hack(self):
         """Hack away at the PySide binary for this frozen application.
@@ -116,34 +180,77 @@ class Hatchet(object):
         methods it uses, then replace its PySide modules with new binaries
         hacked down to exclude useless code 
         """
-        self.add_directory(self.appdir)
+        if not self.mf.modules:
+            self.add_directory(self.appdir)
         tdir = tempfile.mkdtemp()
         try:
             sourcefile = self.fetch_pyside_source()
             sourcedir = self.unpack_tarball(sourcefile,tdir)
             self.hack_pyside_source(sourcedir)
-            sys.stdout.flush()
             self.build_pyside_source(sourcedir)
             self.copy_hacked_pyside_modules(sourcedir,self.appdir)
         finally:
             shutil.rmtree(tdir)
 
-    def add_script(self,pathname):
+    def add_script(self,pathname,follow_imports=True):
         """Add an additional script for the frozen application.
 
         This method adds the specified script to the internal modulefinder.
         It and all of its imports will be examined for pyside-related
         identifiers that must not be hacked out of the binary.
-        """
-        self.mf.run_script(pathname)
 
-    def add_zipfile(self,pathname):
+        To incude only the given file and not its imports, specify the
+        "follow_imports" keyword argument as False.
+        """
+        try:
+            if not follow_imports:
+                self.mf.scan_code = lambda *a: None
+            self.mf.run_script(pathname)
+        finally:
+            if not follow_imports:
+                del self.mf.scan_code
+
+    def add_file(self,pathname,pkgname="",follow_imports=True):
+        """Add an additional python source file for the frozen application.
+
+        This method adds the specified *.py or *.pyc file to the modulefinder.
+        It and all of its imports will be examined for pyside-related
+        identifiers that must not be hacked out of the binary.
+
+        To incude only the given file and not its imports, specify the
+        "follow_imports" keyword argument as False.
+        """
+        if pkgname and not pkgname.endswith("."):
+            pkgname += "."
+        nm = os.path.basename(pathname)
+        base,ext = os.path.splitext(nm)
+        if ext == ".py":
+            fp = open(pathname,"rt")
+            stuff = (ext, "r", imp.PY_SOURCE,)
+        elif ext == ".pyc":
+            fp = open(pathname,"rb")
+            stuff = (ext, "r", imp.PY_COMPILED,)
+        else:
+            raise ValueError("unknown file type: %r" % (nm,))
+        try:
+            if not follow_imports:
+                self.mf.scan_code = lambda *a: None
+            self.mf.load_module(pkgname + base,fp,pathname,stuff)
+        finally:
+            if not follow_imports:
+                del self.mf.scan_code
+            fp.close()
+
+    def add_zipfile(self,pathname,follow_imports=True):
         """Add an additional python zipfile for the frozen application.
 
         This method adds the specified zipfile to the internal modulefinder.
         All of its contained python modules, along with their imports, will
         be examined for pyside-related identifiers that must not be hacked
         out of the binary.
+
+        To incude only the contained files and not their imports, specify the
+        "follow_imports" keyword argument as False.
         """
         tdir = tempfile.mkdtemp()
         if not tdir.endswith(os.path.sep):
@@ -157,22 +264,28 @@ class Hatchet(object):
                        continue
                     if not os.path.isdir(os.path.dirname(dstnm)):
                         os.makedirs(os.path.dirname(dstnm))
-                    with open(dstnm,"w") as f:
+                    with open(dstnm,"wb") as f:
                         f.write(zf.read(nm))
             finally:
                 zf.close()
-            self.add_directory(tdir)
+            self.add_directory(tdir,follow_imports=follow_imports)
         finally:
             shutil.rmtree(tdir)
 
-    def add_directory(self,pathname,fqname=""):
+    def add_directory(self,pathname,fqname="",follow_imports=True):
         """Add an additional python directory for the frozen application.
 
         This method adds the specified directory to the internal modulefinder.
         All of its contained python files, along with their imports, will be
         examined for pyside-related identifiers that must not be hacked out
         of the binary.
+
+        To incude only the contained files and not their imports, specify the
+        "follow_imports" keyword argument as False.
         """
+        if fqname and not fqname.endswith("."):
+            fqname += "."
+        rkwds = dict(follow_imports=follow_imports)
         for nm in os.listdir(pathname):
             subpath = os.path.join(pathname,nm)
             if os.path.isdir(subpath):
@@ -180,129 +293,145 @@ class Hatchet(object):
                     inipath = os.path.join(subpath,ininm)
                     if os.path.exists(inipath):
                         self.mf.load_package(fqname + nm,subpath)
-                        self.add_directory(subpath,fqname + nm + ".")
+                        self.add_directory(subpath,fqname+nm+".",**rkwds)
                         break
                 else:
-                    self.add_directory(subpath)
+                    self.add_directory(subpath,**rkwds)
             else:
-                if nm.endswith(".py"):
-                    self._add_py_file(subpath,fqname)
-                elif nm.endswith(".pyc"):
-                    self._add_pyc_file(subpath,fqname)
+                if nm.endswith(".py") or nm.endswith(".pyc"):
+                    self.add_file(subpath,fqname,**rkwds)
                 elif nm.endswith(".zip"):
-                    self.add_zipfile(subpath)
+                    self.add_zipfile(subpath,**rkwds)
                 elif nm.endswith(".exe"):
                     try:
-                        self.add_zipfile(subpath)
+                        self.add_zipfile(subpath,**rkwds)
                     except (zipfile.BadZipfile,):
                         pass
                 else:
                     try:
                         if "executable" in _bt("file",subpath):
-                            self.add_zipfile(subpath)
+                            self.add_zipfile(subpath,**rkwds)
                     except (EnvironmentError,zipfile.BadZipfile,):
                         pass
 
-    def _add_py_file(self,pathname,pkgname):
-        """Add an additional python source file for the frozen application.
-
-        This internal method adds the specified *.py file to the modulefinder.
-        It and all of its imports will be examined for pyside-related
-        identifiers that must not be hacked out of the binary.
-        """
-        nm = os.path.basename(pathname)
-        base,ext = os.path.splitext(nm)
-        fp = open(pathname,"rt")
-        stuff = (ext, "r", imp.PY_SOURCE,)
-        self.mf.load_module(pkgname + base,fp,pathname,stuff)
-
-    def _add_pyc_file(self,pathname,pkgname):
-        """Add an additional python bytecode file for the frozen application.
-
-        This internal method adds the specified *.pyc file to the modulefinder.
-        It and all of its imports will be examined for pyside-related
-        identifiers that must not be hacked out of the binary.
-        """
-        nm = os.path.basename(pathname)
-        base,ext = os.path.splitext(nm)
-        fp = open(pathname,"rb")
-        stuff = (ext, "r", imp.PY_COMPILED,)
-        self.mf.load_module(pkgname + base,fp,pathname,stuff)
-
-    def find_rejections(self):
-        """Find classes and methods that can be rejected from PySide.
+    def expand_kept_classes(self):
+        """Find classes and methods that might be used by the application.
 
         This method examines the code in use by the application, and finds
-        useless classes and methods that can be hacked out of the Pyside
-        binary.  It generates tuples of the form ("ClassName",) for useless
-        classes, and the form ("ClassName","methodName",) for useless methods
-        on otherwise useful classes.
+        classes that it might use by matching their names against the
+        identifiers present in the code.
+
+        Any such classes found are added to the "keep_classes" attribute.
         """
+        self.logger.debug("expanding kept classes")
         #  Find all python identifiers used in the application.
-        #  It's a wide net, it's easier than type inference! ;-)
+        #  It's a wide net, but it's easier than type inference! ;-)
         used_ids = set()
         for m in self.mf.modules.itervalues():
             if m.__code__ is not None:
                 self.find_identifiers_in_code(m.__code__,used_ids)
-        #  Begin from the set of all classes used directly in the code,
-        #  and all of their base classes.
-        useful_classes = set()
-        for classnm in self.tdb.iterclasses():
+        #  Keep all classes used directly in code.
+        for classnm in self.typedb.iterclasses():
             if classnm in used_ids or classnm in KEEP_CLASSES:
-                for sclassnm in self.tdb.superclasses(classnm):
-                    if sclassnm not in useful_classes:
-                        print "USEFUL CLASS", repr(sclassnm)
-                        useful_classes.add(sclassnm)
-        #  Now iteratively expand that set with possible return types of any
-        #  methods called on the useful classes.
-        todo_classes = deque(useful_classes)
+                self.logger.debug("keeping class: %s",classnm)
+                self.keep_classes.add(classnm)
+        #  Keep all superclasses of all kept classes
+        for classnm in list(self.keep_classes):
+            for sclassnm in self.typedb.superclasses(classnm):
+                if sclassnm not in self.keep_classes:
+                    self.logger.debug("keeping class: %s",sclassnm)
+                    self.keep_classes.add(sclassnm)
+        #  Now iteratively expand the kept classess with possible return types
+        #  of any methods called on the kept classes.
+        todo_classes = deque(self.keep_classes)
         while todo_classes:
             classnm = todo_classes.popleft()
-            print "CHECKING", classnm, "[", len(todo_classes), "more to do ]"
-            kept_methods = set(self.find_kept_methods(classnm))
-            for methnm in self.tdb.itermethods(classnm):
-                if methnm in used_ids or methnm in kept_methods or methnm+"_" in used_ids:
-                    print "CHECKING", classnm, methnm
-                    for rtype in self.tdb.relatedtypes(classnm,methnm):
-                        for sclassnm in self.tdb.superclasses(rtype):
-                            if sclassnm not in useful_classes:
-                                print "USEFUL CLASS", repr(sclassnm)
-                                useful_classes.add(sclassnm)
-                                todo_classes.append(sclassnm)
-        #  Now we can reject any class that's not useful, and any method
-        #  on a useful class that is not used in the code.
-        for classnm in self.tdb.iterclasses():
-            if classnm not in useful_classes and classnm not in KEEP_CLASSES:
-                yield (classnm,)
-            elif "*" not in KEEP_METHODS.get(classnm,()):
-                kept_methods = set(self.find_kept_methods(classnm))
-                for methnm in self.tdb.itermethods(classnm):
-                    if methnm in used_ids:
-                        continue
-                    if methnm+"_" in used_ids:
-                        continue
-                    if methnm in kept_methods:
-                        continue
-                    yield (classnm,methnm,)
+            num_done = len(self.keep_classes) - len(todo_classes)
+            num_todo = len(self.keep_classes)
+            self.logger.debug("expanding methods of %s (class %d of %d)",
+                              classnm,num_done,num_todo)
+            kept_methods = self.expand_kept_methods(classnm,used_ids)
+            for methnm in self.typedb.itermethods(classnm):
+                if methnm not in kept_methods:
+                    continue
+                self.logger.debug("expanding method %s::%s",classnm,methnm)
+                for rtype in self.typedb.relatedtypes(classnm,methnm):
+                    for sclassnm in self.typedb.superclasses(rtype):
+                        if sclassnm not in self.keep_classes:
+                            self.logger.debug("keeping class: %s",sclassnm)
+                            self.keep_classes.add(sclassnm)
+                            todo_classes.append(sclassnm)
 
-    def find_kept_methods(self,classnm):
-        """Find all methods that must be kept for the given class."""
-        for methnm in self.tdb.itermethods(classnm):
-            if methnm in KEEP_METHODS.get(classnm,()):
-                yield methnm
-            if methnm in KEEP_METHODS.get("*",()):
-                yield methnm
-            if methnm == classnm:
-                yield methnm
-            #  Shiboken doesn't like it when we reject methods
-            #  that have a pure virtual override somewhere in the
-            #  inheritence chain.  This should probably be fixed
-            #  in shiboken, but we work around it for now.
-            #  TODO: is this just superstition on my part?
-            for sclassnm in self.tdb.superclasses(classnm):
-                if self.tdb.ispurevirtual(sclassnm,methnm):
-                    yield methnm
-                    break
+    def expand_kept_methods(self,classnm,used_ids):
+        """Find all methods that must be kept for the given class.
+
+        This method uses the given set of of used identifiers to find all
+        methods on the given class that might be used by the application.
+        Any such methods found are added to the "keep_methods" attribute,
+        keyed by classname.
+
+        The set of kept methods is also returned.
+        """
+        kept_methods = self.keep_methods.setdefault(classnm,set())
+        for methnm in self.typedb.itermethods(classnm):
+            if methnm in kept_methods:
+                continue
+            if methnm in used_ids:
+                self.logger.debug("keeping method: %s::%s",classnm,methnm)
+                kept_methods.add(methnm)
+            elif methnm + "_" in used_ids:
+                self.logger.debug("keeping method: %s::%s",classnm,methnm)
+                kept_methods.add(methnm)
+            elif methnm == classnm:
+                self.logger.debug("keeping method: %s::%s",classnm,methnm)
+                kept_methods.add(methnm)
+            elif "*" in kept_methods:
+                self.logger.debug("keeping method: %s::%s",classnm,methnm)
+                kept_methods.add(methnm)
+            elif methnm in self.keep_methods.get("*",()):
+                self.logger.debug("keeping method: %s::%s",classnm,methnm)
+                kept_methods.add(methnm)
+            elif methnm in KEEP_METHODS.get(classnm,()):
+                self.logger.debug("keeping method: %s::%s",classnm,methnm)
+                kept_methods.add(methnm)
+            elif "*" in KEEP_METHODS.get(classnm,()):
+                self.logger.debug("keeping method: %s::%s",classnm,methnm)
+                kept_methods.add(methnm)
+            elif methnm in KEEP_METHODS.get("*",()):
+                self.logger.debug("keeping method: %s::%s",classnm,methnm)
+                kept_methods.add(methnm)
+            else:
+                #  Shiboken doesn't like it when we reject methods
+                #  that have a pure virtual override somewhere in the
+                #  inheritence chain.  This should probably be fixed
+                #  in shiboken, but we work around it for now.
+                #  TODO: is this just superstition on my part?
+                for sclassnm in self.typedb.superclasses(classnm):
+                    if self.typedb.ispurevirtual(sclassnm,methnm):
+                        self.logger.debug("keeping method: %s::%s",classnm,
+                                                                   methnm)
+                        kept_methods.add(methnm)
+                        break
+        return kept_methods
+
+    def find_rejections(self):
+        """Find classes and methods that can be rejected from PySide.
+
+        This method uses the set of kept classes and methods to determine
+        the classes and methods that can be hacked out of the PySide binary.
+
+        It generates tuples of the form ("ClassName",) for useless classes,
+        and the form ("ClassName","methodName",) for useless methods on
+        otherwise useful classes.
+        """
+        self.expand_kept_classes()
+        for classnm in self.typedb.iterclasses():
+            if classnm not in self.keep_classes:
+                yield (classnm,)
+            else:
+                for methnm in self.typedb.itermethods(classnm):
+                    if methnm not in self.keep_methods.get(classnm,()):
+                        yield (classnm,methnm,)
 
     def find_identifiers_in_code(self,code,ids=None):
         """Find any possible identifiers used by the given code.
@@ -335,44 +464,46 @@ class Hatchet(object):
         we first look there for a cached version.  PIP_DOWNLOAD_CACHE is
         used as a fallback location.
         """
-        cachedir = os.environ.get("PYSIDEKICK_DOWNLOAD_CACHE",None)
-        if cachedir is None:
-            cachedir = os.environ.get("PIP_DOWNLOAD_CACHE",None)
-        if cachedir is not None:
-            if not os.path.isdir(cachedir):
-                os.makedirs(cachedir)
+        cachedir = get_cache_dir("Hatchet","src")
         nm = os.path.basename(urlparse.urlparse(PYSIDE_SOURCE_URL).path)
-        cachefile = os.path.join(cachedir,nm)
-        #  Use cached version is it has correct md5.
-        if os.path.exists(cachefile):
-            md5 = hashlib.md5()
-            with open(cachefile,"r") as f:
-                data = f.read(1024*32)
-                while data:
-                    md5.update(data)
+        if cachedir is None:
+            (fd,cachefile) = tempfile.mkstemp()
+            os.close(fd)
+        else:
+            #  Use cached version if it has correct md5.
+            cachefile = os.path.join(cachedir,nm)
+            if os.path.exists(cachefile):
+                md5 = hashlib.md5()
+                with open(cachefile,"rb") as f:
                     data = f.read(1024*32)
-            if md5.hexdigest() != PYSIDE_SOURCE_MD5:
-                print >>sys.stderr, "BAD MD5 FOR",cachefile
-                print >>sys.stderr, md5.hexdigest(),"!=",PYSIDE_SOURCE_MD5
-                os.unlink(cachefile)
+                    while data:
+                        md5.update(data)
+                        data = f.read(1024*32)
+                if md5.hexdigest() != PYSIDE_SOURCE_MD5:
+                    self.logger.warn("bad MD5 for %r",cachefile)
+                    self.logger.warn("    %s != %s",md5.hexdigest(),
+                                                    PYSIDE_SOURCE_MD5)
+                    os.unlink(cachefile)
         #  Download if we can't use the cached version
-        if not os.path.exists(cachefile):
-            print >>sys.stderr, "DOWNLOADING",PYSIDE_SOURCE_URL
+        if cachedir is None or not os.path.exists(cachefile):
+            self.logger.info("downloading %s",PYSIDE_SOURCE_URL)
             fIn = urllib2.urlopen(PYSIDE_SOURCE_URL)
             try:
                  with open(cachefile,"wb") as fOut:
                     shutil.copyfileobj(fIn,fOut)
             finally:
                 fIn.close()
+            #  Verify the download
             md5 = hashlib.md5()
-            with open(cachefile,"r") as f:
+            with open(cachefile,"rb") as f:
                 data = f.read(1024*32)
                 while data:
                     md5.update(data)
                     data = f.read(1024*32)
             if md5.hexdigest() != PYSIDE_SOURCE_MD5:
-                print >>sys.stderr, "BAD MD5 FOR",cachefile
-                print >>sys.stderr, md5.hexdigest(),"!=",PYSIDE_SOURCE_MD5
+                self.logger.critical("bad MD5 for %r",cachefile)
+                self.logger.critical("    %s != %s",md5.hexdigest(),
+                                                    PYSIDE_SOURCE_MD5)
                 raise RuntimeError("corrupted download: %s" % (url,))
         return cachefile
 
@@ -384,6 +515,7 @@ class Hatchet(object):
         first directory that contains an actual file.  This is usually the
         directory you want for e.g. building a source distribution.
         """
+        self.logger.info("unpacking %r",sourcefile)
         tf = tarfile.open(sourcefile,"r:*")
         if not destdir.endswith(os.path.sep):
             destdir += os.path.sep
@@ -415,23 +547,27 @@ class Hatchet(object):
             * removing <class>_wrapper.cpp entries from the makefiles
 
         """
+        self.logger.info("hacking PySide sources in %r",sourcedir)
+        logger = self.logger
         #  Find all rejections and store them for quick reference.
         reject_classes = set()
         reject_methods = {}
         num_rejected_methods = 0
         for rej in self.find_rejections():
-            print "REJECT", rej
             if len(rej) == 1:
+               logger.debug("reject %s",rej[0])
                reject_classes.add(rej[0])
             else:
+               logger.debug("reject %s::%s",rej[0],rej[1])
                num_rejected_methods += 1
                reject_methods.setdefault(rej[0],set()).add(rej[1])
-        print "rejecting %s classes, %d methods" % (len(reject_classes),num_rejected_methods,)
+        logger.info("rejecting %s classes, %d methods",len(reject_classes),
+                                                      num_rejected_methods)
         #  Find each top-level module directory and patch the contained files.
         psdir = os.path.join(sourcedir,"PySide")
         moddirs = []
         for modnm in os.listdir(psdir):
-            if not modnm.startswith("Qt"):
+            if not modnm.startswith("Qt") and not modnm == "phonon":
                 continue
             moddir = os.path.join(psdir,modnm)
             if os.path.isdir(moddir):
@@ -504,6 +640,10 @@ class Hatchet(object):
                                 if "wrapper.cpp" in ln:
                                     if "_module_wrapper.cpp" not in ln:
                                         break
+                            if "_"+rejcls[1:].lower()+"_" in ln:
+                                if "wrapper.cpp" in ln:
+                                    if "_module_wrapper.cpp" not in ln:
+                                        break
                             if rejcls in ln and "check_qt_class" in ln:
                                 break
                         else:
@@ -518,7 +658,7 @@ class Hatchet(object):
                         for ln in lines:
                             if modnm not in ln:
                                 yield ln
-                    print "NOT BUILDING MODULE", modnm
+                    logger.debug("module empty, not building: %s",modnm)
                     self.patch_file(dont_build_module,psdir,"CMakeLists.txt")
 
     def patch_file(self,patchfunc,*paths):
@@ -532,7 +672,7 @@ class Hatchet(object):
         sequence of lines.
         """
         filepath = os.path.join(*paths)
-        print "PATCHING", filepath
+        self.logger.debug("patching file %r",filepath)
         mod = os.stat(filepath).st_mode
         (fd,tf) = tempfile.mkstemp()
         try:
@@ -561,7 +701,7 @@ class Hatchet(object):
         as input a DOM object and returns a modified DOM.
         """
         filepath = os.path.join(*paths)
-        print "PATCHING", filepath
+        self.logger.debug("patching file %r",filepath)
         mod = os.stat(filepath).st_mode
         with open(filepath,"rt") as fIn:
             xml = minidom.parse(fIn)
@@ -589,6 +729,7 @@ class Hatchet(object):
         For it to work, you must have the necessary tools installed on your
         system (e.g. cmake, shiboken)
         """
+        self.logger.info("building PySide in %r",sourcedir)
         olddir = os.getcwd()
         os.chdir(sourcedir)
         try:
@@ -598,32 +739,52 @@ class Hatchet(object):
             #  We also try to use compiler options from python so that the
             #  libs will match as closely as possible.
             env = os.environ.copy()
-            env.setdefault("CC",sysconfig.get_config_var("CC"))
-            env.setdefault("CXX",sysconfig.get_config_var("CXX"))
-            cxxflags = sysconfig.get_config_var("CFLAGS")
+            cc = sysconfig.get_config_var("CC")
+            if cc is not None:
+                env.setdefault("CC",cc)
+            cxx = sysconfig.get_config_var("CXX")
+            if cxx is not None:
+                env.setdefault("CXX",cxx)
+            cxxflags = sysconfig.get_config_var("CFLAGS") or ""
             cxxflags += " " + env.get("CXXFLAGS","")
-            cxxflags += " -fno-exceptions -Wl,--gc-sections"
+            if sys.platform != "win32":
+                cxxflags += " -fno-exceptions -Wl,--gc-sections"
             env["CXXFLAGS"] = cxxflags
-            ldflags = sysconfig.get_config_var("LDFLAGS")
-            ldflags += " " + env.get("LDFLAGS","")
-            ldflags += " --gc-sections -lpthread -lrt -lz -ldl -lQtNetwork -lQtCore -ljpeg -ltiff -lpng14 -lz -lX11 -lXrender -lXrandr -lXext -lfontconfig -lSM -lICE"
-            env["LDFLAGS"] = ldflags
-            subprocess.check_call((
-                "cmake",
-                "-DCMAKE_BUILD_TYPE=MinSizeRel",
-                "-DCMAKE_VERBOSE_MAKEFILE=ON",
-                "-DBUILD_TESTS=False",
-                "-DPYTHON_EXECUTABLE="+sys.executable,
-                "-DPYTHON_INCLUDE_DIR="+sysconfig.get_python_inc()
-            ),env=env)
-            subprocess.check_call((
-                "make",
-            ),env=env)
+            #  These are required for static linkig on linux
+            #if sys.platform not in ("win32","darwin",):
+            #    ldflags = sysconfig.get_config_var("LDFLAGS")
+            #    ldflags += " " + env.get("LDFLAGS","")
+            #    ldflags += " --gc-sections -lpthread -lrt -lz -ldl lQtNetwork -lQtCore -ljpeg -ltiff -lpng14 -lz -lX11 -lXrender -lXrandr -lXext -lfontconfig -lSM -lICE"
+            #    env["LDFLAGS"] = ldflags
+            #
+            cmd = ["cmake",
+                   "-DCMAKE_BUILD_TYPE=MinSizeRel",
+                   "-DCMAKE_VERBOSE_MAKEFILE=ON",
+                   "-DBUILD_TESTS=False",
+                   "-DPYTHON_EXECUTABLE="+sys.executable,
+                   "-DPYTHON_INCLUDE_DIR="+sysconfig.get_python_inc()
+            ]
+            if "CMAKE_INSTALL_PREFIX" in env:
+                cmd.append(
+                   "-DCMAKE_INSTALL_PREFIX="+env["CMAKE_INSTALL_PREFIX"]
+                )
+            subprocess.check_call(cmd,env=env)
+            #  but the actual build program is "nmake" on win32
+            if sys.platform == "win32":
+                cmd = ["nmake"]
+            else:
+                cmd = ["make"]
+            subprocess.check_call(cmd,env=env)
         finally:
             os.chdir(olddir)
 
     def copy_hacked_pyside_modules(self,sourcedir,destdir):
         """Copy PySide modules from build dir back into the frozen app."""
+        def is_dll(nm):
+            if nm.endswith(".so"):
+                return True
+            if nm.endswith(".so"):
+                return True
         #  Find all the build modules we're able to copy over
         psdir = os.path.join(sourcedir,"PySide")
         modules = []
@@ -635,21 +796,46 @@ class Hatchet(object):
         for (dirnm,_,filenms) in os.walk(destdir):
             for filenm in filenms:
                 filepath = os.path.join(dirnm,filenm)
-                if not filenm.endswith(".so") and not filenm.endswith(".pyd"):
-                    continue
-                if "PySide" not in filepath:
-                    continue
-                for modnm in modules:
-                    if filepath.endswith(modnm):
-                        newfilepath = os.path.join(psdir,modnm)
-                        self.copy_linker_paths(filepath,newfilepath)
-                        print "REPLACING", filepath, "WITH", modnm
-                        os.unlink(filepath)
-                        shutil.copy2(newfilepath,filepath)
+                newfilepath = None
+                #  If it's a PySide module, try to copy new version
+                if "PySide" in filepath:
+                    for modnm in modules:
+                        if filenm.endswith(modnm):
+                            newfilepath = os.path.join(psdir,modnm)
+                            break
+                #  If it's the pyside, replace that as well
+                elif "pyside." in filenm:
+                    newfilepath = os.path.join(sourcedir,"libpyside",filenm)
+                    if not os.path.exists(newfilepath):
+                        newfilepath = None
+                #  If it's the shiboken lib, try to find that and replace it.
+                #  This is necessary if it's a different version to the
+                #  one bundled with the application.
+                elif "shiboken." in filenm:
+                    if "CMAKE_INSTALL_PREFIX" in os.environ:
+                        instprf = os.environ["CMAKE_INSTALL_PREFIX"]
+                        for dirnm in ("bin","lib",):
+                            newfilepath = os.path.join(instprf,dirnm,filenm)
+                            if os.path.exists(newfilepath):
+                                break
+                            newfilepath = None
+                #  Copy the new lib into place, and mangle it to look
+                #  like the old one (e.g. linker paths).
+                if newfilepath is not None:
+                    self.copy_linker_paths(filepath,newfilepath)
+                    self.logger.info("copying %r => %r",newfilepath,filepath)
+                    os.unlink(filepath)
+                    shutil.copy2(newfilepath,filepath)
+                    if sys.platform != "win32":
                         _do("strip",filepath)
 
     if sys.platform == "darwin":
         def copy_linker_paths(self,srcfile,dstfile):
+            """Copy runtime linker paths from source to destination.
+
+            On MacOSX, this uses install_name_tool to copy intallnames out
+            of the sourcefile and into the destfile.
+            """
             srclinks = _bt("otool","-L",srcfile).strip().split("\n")
             dstlinks = _bt("otool","-L",dstfile).strip().split("\n")
             for dstlink in dstlinks:
@@ -666,8 +852,20 @@ class Hatchet(object):
                         _do("install_name_tool","-change",
                             dstlibpath,srclibpath,dstfile)
                         break
-    elif "linux" in sys.platform:
+    elif sys.platform == "win32":
         def copy_linker_paths(self,srcfile,dstfile):
+            """Copy runtime linker paths from source to destination.
+
+            On win32, this does nothing.
+            """
+            pass
+    else:
+        def copy_linker_paths(self,srcfile,dstfile):
+            """Copy runtime linker paths from source to destination.
+
+            On Linux-like platforms, this uses readelf and patchelf to copy
+            the rpath from sourcefile to destfile.
+            """
             rpath = None
             for ln in _bt("readelf","-d",srcfile):
                 if "RPATH" in ln and "Library rpath:" in ln:
@@ -675,18 +873,36 @@ class Hatchet(object):
                     break
             if rpath is not None:
                 do("patchelf","--set-rpath",rpath,dstfile)
-    else:
-        def copy_linker_paths(self,srcfile,dstfile):
-            pass
 
+
+def get_cache_dir(*paths):
+    """Get the directory in which we can cache downloads etc.
+
+    This function uses the environment variable PYSIDEKICK_DOWNLOAD_CACHE,
+    or failing that PIP_DOWNLOAD_CACHE, to construct a directory in which
+    we can cache downloaded files and other expensive-to-generate content.
+
+    If caching is disabled, None is returned.
+    """
+    cachedir = os.environ.get("PYSIDEKICK_DOWNLOAD_CACHE",None)
+    if cachedir is None:
+        cachedir = os.environ.get("PIP_DOWNLOAD_CACHE",None)
+        if cachedir is not None:
+            cachedir = os.path.join(cachedir,"PySideKick")
+    if cachedir is not None:
+        cachedir = os.path.join(cachedir,*paths)
+        if not os.path.isdir(cachedir):
+            os.makedirs(cachedir)
+    return cachedir
 
 
 def _do(*cmdline):
+    """A simple shortcut to execute the given command."""
     subprocess.check_call(cmdline)
 
 
 def _bt(*cmdline):
-    """Execute the command, returning stdout.
+    """A simple shortbut to execute the command, returning stdout.
 
     "bt" is short for "backticks"; hopefully its use is obvious to shell
     scripters and the like.
@@ -722,10 +938,116 @@ class TypeDB(object):
     RE_CLASS_LINK=re.compile(r"<a href=\"(\w+).html\">(\w+)</a>")
     RE_METHOD_LINK=re.compile(r"<a href=\"(\w+).html\#([\w\-\.]+)\">(\w+)</a>")
 
-    def __init__(self,root_url="http://doc.qt.nokia.com/4.7/"):
+    #  These classes seem to be missing from the online docs.
+    #  They are in the docs on the PySide website, but those don't seem
+    #  to embed information about e.g. protected or virtual status.
+    MISSING_CLASSES = {
+        "QAudio": (),
+        "QPyTextObject": ("QTextObjectInterface","QObject",),
+        "QAbstractPageSetupDialog": ("QDialog",),
+        "QTextStreamManipulator": (),
+        "QFactoryInterface": (),
+        "QScriptExtensionInterface": ("QFactoryInterface",),
+        "QAudioEngineFactoryInterface": ("QFactoryInterface",),
+        "QAudioEnginePlugin": ("QAudioEngineFactoryInterface","QObject",),
+        "QAbstractAudioDeviceInfo": ("QObject",),
+        "QAbstractAudioOutput": ("QObject",),
+        "QAbstractAudioInput": ("QObject",),
+        "QDeclarativeExtensionInterface": (),
+    }
+
+    #  These methods seem to be missing from the online docs.
+    MISSING_METHODS = {
+        "QAbstractItemModel": {
+            "decodeData":  (("QModelIndex","QList","QDataStream",),
+                            True,False),
+            "encodeData":  (("QModelIndex","QList","QDataStream",),
+                            True,False),
+        },
+        "QAbstractPageSetupDialog": {
+            "printer":  (("QPrinter",),
+                         True,False),
+        },
+        "QScriptExtensionInterface": {
+            "initialize":  (("QScriptEngine",),
+                            True,False),
+        },
+        "QAudioEngineFactoryInterface": {
+            "availableDevices":  (("QAudio",),
+                                  True,False),
+            "createDeviceInfo":  (("QByteArray","QAudio",),
+                                  True,False),
+            "createInput":  (("QByteArray","QAudioFormat",),
+                             True,False),
+            "createOutput":  (("QByteArray","QAudioFormat",),
+                             True,False),
+        },
+        "QAbstractAudioDeviceInfo": {
+            "byteOrderList": ((),True,False),
+            "channelsList": ((),True,False),
+            "codecList": ((),True,False),
+            "deviceName": ((),True,False),
+            "frequencyList": ((),True,False),
+            "isFormatSupported": (("QAudioFormat",),True,False),
+            "nearestFormat": (("QAudioFormat",),True,False),
+            "preferredFormat": ((),True,False),
+            "sampleSizeList": ((),True,False),
+            "sampleTypeList": ((),True,False),
+        },
+        "QAbstractAudioOutput": {
+            "bufferSize": ((),True,False),
+            "bytesFree": ((),True,False),
+            "elapsedUSecs": ((),True,False),
+            "error": ((),True,False),
+            "format": ((),True,False),
+            "notify": ((),True,False),
+            "notifyInterval": ((),True,False),
+            "periodSize": ((),True,False),
+            "processedUSecs": ((),True,False),
+            "reset": ((),True,False),
+            "resume": ((),True,False),
+            "setBufferSize": ((),True,False),
+            "setNotifyInterval": ((),True,False),
+            "start": (("QIODevice",),True,False),
+            "state": ((),True,False),
+            "stateChanged": ((),True,False),
+            "stop": ((),True,False),
+            "suspend": ((),True,False),
+        },
+        "QAbstractAudioInput": {
+            "bufferSize": ((),True,False),
+            "bytesready": ((),True,False),
+            "elapsedUSecs": ((),True,False),
+            "error": ((),True,False),
+            "format": ((),True,False),
+            "notify": ((),True,False),
+            "notifyInterval": ((),True,False),
+            "periodSize": ((),True,False),
+            "processedUSecs": ((),True,False),
+            "reset": ((),True,False),
+            "resume": ((),True,False),
+            "setBufferSize": ((),True,False),
+            "setNotifyInterval": ((),True,False),
+            "start": (("QIODevice",),True,False),
+            "state": ((),True,False),
+            "stateChanged": ((),True,False),
+            "stop": ((),True,False),
+            "suspend": ((),True,False),
+        },
+        "QDeclarativeExtensionInterface": {
+            "initializeEngine": (("QDeclarativeEngine",),
+                                 True,False),
+            "registerTypes": ((),True,False),
+        },
+    }
+
+    def __init__(self,root_url="http://doc.qt.nokia.com/4.7/",logger=None):
         if not root_url.endswith("/"):
             root_url += "/"
         self.root_url = root_url
+        if logger is None:
+            logger = logging.getLogger("PySideKick.Hatchet")
+        self.logger = logger
 
     _url_cache = {}
     def _read_url(self,url):
@@ -735,34 +1057,30 @@ class TypeDB(object):
             return self._url_cache[url]
         except KeyError:
             pass
-        cachedir = os.environ.get("PYSIDEKICK_DOWNLOAD_CACHE",None)
-        if cachedir is None:
-            cachedir = os.environ.get("PIP_DOWNLOAD_CACHE",None)
+        cachedir = get_cache_dir("Hatchet","QtDocTypeDB")
         if cachedir is None:
             cachefile = None
+            cachefile404 = None
         else:
-            cachedir = os.path.join(cachedir,"QtDocTypeDB")
-            if not os.path.isdir(cachedir):
-                os.makedirs(cachedir)
             cachefile = os.path.join(cachedir,urllib.quote(url,""))
-            missingcachefile = os.path.join(cachedir,
-                                            "missing-"+urllib.quote(url,""))
+            cachefile404 = os.path.join(cachedir,"404_"+urllib.quote(url,""))
         if cachefile is not None:
             try:
                 with open(cachefile,"rb") as f:
                     self._url_cache[url] = f.read()
                     return self._url_cache[url]
             except EnvironmentError:
-                if os.path.exists(missingcachefile):
+                if os.path.exists(cachefile404):
                     msg = "not found: " + url
                     raise urllib2.HTTPError(url,"404",msg,{},None)
         f = None
         try:
+            self.logger.info("reading Qt API: %s",url)
             f = urllib2.urlopen(url)
             data = f.read()
         except urllib2.HTTPError, e:
-            if "404" in str(e) and cachefile is not None:
-                open(missingcachefile,"w").close()
+            if "404" in str(e) and cachefile404 is not None:
+                open(cachefile404,"w").close()
             raise
         finally:
             if f is not None:
@@ -804,16 +1122,9 @@ class TypeDB(object):
 
     def iterclasses(self):
         """Iterator over all available class names."""
-        #  This is a make-believe class create just for python.
-        yield "QPyTextObject"
-        yield "QAbstractPageSetupDialog"
-        #  These classes seem to be missing from the online docs.
-        #  They are in the docs on the PySide website, I should probably
-        #  move to parsing those instead.
-        yield "QAbstractPageSetupDialog"
-        yield "QTextStreamManipulator"
-        yield "QScriptExtensionInterface"
-        #  Everything else is conventienly listed on the "classes" page.
+        for classnm in self.MISSING_CLASSES.iterkeys():
+            yield classnm
+        #  Everything else is conventiently listed on the "classes" page.
         classlist = self._read_url("classes.html")
         for ln in classlist.split("\n"):
             ln = ln.strip()
@@ -824,13 +1135,7 @@ class TypeDB(object):
 
     def isclass(self,classnm):
         """Check whether the given name is indeed a class."""
-        if classnm == "QPyTextObject":
-            return True
-        if classnm == "QAbstractPageSetupDialog":
-            return True
-        if classnm == "QTextStreamManipulator":
-            return True
-        if classnm == "QScriptExtensionInterface":
+        if classnm in self.MISSING_CLASSES:
             return True
         try:
             self._read_url(classnm.lower()+"-members.html")
@@ -844,15 +1149,10 @@ class TypeDB(object):
     def superclasses(self,classnm):
         """Get all superclasses for a given class."""
         yield classnm
-        if classnm == "QPyTextObject":
-            yield "QTextObjectInterface"
-            yield "QObject"
-            return
-        if classnm == "QAbstractPageSetupDialog":
-            yield "QDialog"
-            yield "QWidget"
-            yield "QPaintDevice"
-            yield "QObject"
+        if classnm in self.MISSING_CLASSES:
+            for bclassnm in self.MISSING_CLASSES[classnm]:
+                for sclassnm in self.superclasses(bclassnm):
+                    yield sclassnm
             return
         docstr = self._read_url(classnm.lower()+".html")
         for ln in docstr.split("\n"):
@@ -863,42 +1163,16 @@ class TypeDB(object):
                         for supsupcls in self.superclasses(cname):
                             yield supsupcls
 
-    def subclasses(self,classnm):
-        """Get all subclasses for a given class."""
-        yield classnm
-        if classnm == "QPyTextObject":
-            return
-        if classnm == "QAbstractPageSetupDialog":
-            return
-        docstr = self._read_url(classnm.lower()+".html")
-        for ln in docstr.split("\n"):
-            ln = ln.strip()
-            if "Inherited by" in ln:
-                for subcls in self._get_linked_classes(ln):
-                    for cname in self._canonical_class_names(subcls):
-                        yield cname
-                        for subsubcls in self.subclasses(cname):
-                            yield subsubcls
-
     def itermethods(self,classnm):
         """Iterator over all methods on a given class."""
         #  These methods are missing from the online docs.
-        if classnm == "QAbstractItemModel":
-            yield "decodeData"
-            yield "encodeData"
-        if classnm == "QScriptExtensionInterface":
-            yield "initialize"
-            return
-        if classnm == "QPyTextObject":
-            for methnm in self.itermethods("QObject"):
+        if classnm in self.MISSING_METHODS:
+            for methnm in self.MISSING_METHODS[classnm]:
                 yield methnm
-            for methnm in self.itermethods("QTextObjectInterface"):
-                yield methnm
-            return
-        if classnm == "QAbstractPageSetupDialog":
-            yield "printer"
-            for methnm in self.itermethods("QDialog"):
-                yield methnm
+        if classnm in self.MISSING_CLASSES:
+            for sclassnm in self.MISSING_CLASSES[classnm]:
+                for methnm in self.itermethods(sclassnm):
+                    yield methnm
             return
         docstr = self._read_url(classnm.lower()+"-members.html")
         for ln in docstr.split("\n"):
@@ -913,31 +1187,17 @@ class TypeDB(object):
         Given a classname and methodname, this method returns the set of all
         class names that are "related to" the specified method.  Basically,
         these are the classes that can be passed to the method as arguments
-        or returned as values.
+        or returned from it as values.
         """
-        if classnm == "QAbstractItemModel":
-            if methnm in ("decodeData","encodeData",):
-                yield "QModelIndexList"
-                yield "QDataStream"
-            return
-        if classnm == "QPyTextObject":
-            if methnm in ("drawObject","intrinsicSize",):
-                for rel in self.relatedtypes("QTextObjectInterface",methnm):
-                    yield rel
-            else:
-                for rel in self.relatedtypes("QObject",methnm):
-                    yield rel
-            return
-        if classnm == "QAbstractPageSetupDialog":
-            if methnm in ("printer",):
-                yield "QPrinter"
-            else:
-                for rel in self.relatedtypes("QDialog",methnm):
-                    yield rel
-            return
-        if classnm == "QScriptExtensionInterface":
-            if methnm in ("initialize",):
-                yield "QScriptEngine"
+        if classnm in self.MISSING_METHODS:
+            if methnm in self.MISSING_METHODS[classnm]:
+                for rtype in self.MISSING_METHODS[classnm][methnm][0]:
+                    yield rtype
+                return
+        if classnm in self.MISSING_CLASSES:
+            for bclassnm in self.MISSING_CLASSES[classnm]:
+                for rtype in self.relatedtypes(bclassnm,methnm):
+                    yield rtype
             return
         docstr = self._read_url(classnm.lower()+"-members.html")
         for ln in docstr.split("\n"):
@@ -959,13 +1219,13 @@ class TypeDB(object):
 
     def ispurevirtual(self,classnm,methnm):
         """Check whether a given method is a pure virtual method."""
-        if classnm == "QPyTextObject":
-            if methnm in ("drawObject","intrinsicSize",):
-                return True
-            return False
-        if classnm == "QAbstractPageSetupDialog":
-            if methnm in ("printer",):
-                return True
+        if classnm in self.MISSING_METHODS:
+            if methnm in self.MISSING_METHODS[classnm]:
+                return self.MISSING_METHODS[classnm][methnm][1]
+        if classnm in self.MISSING_CLASSES:
+            for bclassnm in self.MISSING_CLASSES[classnm]:
+                if self.ispurevirtual(bclassnm,methnm):
+                    return True
             return False
         #  Pure virtual methods have a "= 0" at the end of their signature.
         docstr = self._read_url(classnm.lower()+".html")
@@ -991,12 +1251,45 @@ def hack(appdir):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print >>sys.stderr, "usage:  Hatchet /path/to/frozen/app"    
+    import optparse
+    usage = "usage: Hatchet [options] /path/to/frozen/app [extra files]"
+    op = optparse.OptionParser(usage=usage)
+    op.add_option("-d","--debug",default="DEBUG",
+                  help="set the loggin debug level")
+    op.add_option("","--follow-imports",
+                  action="store_true",
+                  dest="follow_imports",
+                  help="follow import when loading code",
+                  default=True)
+    op.add_option("","--no-follow-imports",
+                  action="store_true",
+                  help="don't follow imports when loading code",
+                  dest="follow_imports")
+    (opts,args) = op.parse_args()
+    try:
+        opts.debugs = int(opts.debug)
+    except ValueError:
+        try:
+            opts.debug = getattr(logging,opts.debug)
+        except AttributeError:
+            print >>sys.stderr, "unknown debug level:", opts.debug
+            sys.exit(1)
+    logging.basicConfig(level=opts.debug,format="%(name)-12s:   %(message)s")
+    if len(args) < 1:
+        op.print_help()
         sys.exit(1)
-    if not os.path.isdir(sys.argv[1]):
-        print >>sys.stderr, "error: not a directory:", sys.argv[1]   
-        sys.exit(1)
-    hack(sys.argv[1])
+    if not os.path.isdir(args[0]):
+        print >>sys.stderr, "error: not a directory:", args[0]
+        sys.exit(2)
+    h = Hatchet(args[0])
+    for fnm in args[1:]:
+        if os.path.isdir(fnm):
+            h.add_directory(fnm,follow_imports=opts.follow_imports)
+        if fnm.endswith(".zip") or nm.endswith(".exe"):
+            h.add_zipfile(fnm,follow_imports=opts.follow_imports)
+        else:
+            h.add_file(fnm,follow_imports=opts.follow_imports)
+    h.hack()
+    sys.exit(0)
 
 
