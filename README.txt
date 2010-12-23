@@ -13,3 +13,6 @@ widgets for building applications with PySide.  So far we have:
   * PySideKick.Console:   a simple interactive console to embed in your
                           application
 
+  * PySideKick.Hatchet:   a tool for hacking frozen PySide apps down to size,
+                          by rebuilding PySide with a minimal set of classes
+
