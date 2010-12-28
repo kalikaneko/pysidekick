@@ -869,6 +869,11 @@ class Hatchet(object):
                 if "RPATH" in ln and "Library rpath:" in ln:
                     rpath = ln.rsplit("[",1).split("]",0)
                     break
+            if rpath is None:
+                for ln in _bt("readelf","-d",srcfile):
+                    if "RUNPATH" in ln and "Library runpath:" in ln:
+                        rpath = ln.rsplit("[",1).split("]",0)
+                        break
             if rpath is not None:
                 do("patchelf","--set-rpath",rpath,dstfile)
 
