@@ -1,5 +1,4 @@
 """
-
 PySideKick.Hatchet:  hack frozen PySide apps down to size
 =========================================================
 
@@ -756,7 +755,6 @@ class Hatchet(object):
             #    ldflags += " " + env.get("LDFLAGS","")
             #    ldflags += " --gc-sections -lpthread -lrt -lz -ldl lQtNetwork -lQtCore -ljpeg -ltiff -lpng14 -lz -lX11 -lXrender -lXrandr -lXext -lfontconfig -lSM -lICE"
             #    env["LDFLAGS"] = ldflags
-            #
             cmd = ["cmake",
                    "-DCMAKE_BUILD_TYPE=MinSizeRel",
                    "-DCMAKE_VERBOSE_MAKEFILE=ON",
@@ -935,7 +933,7 @@ class TypeDB(object):
     they have more than enough internal structure to support simple queries.
     """
 
-    RE_CLASS_LINK=re.compile(r"<a href=\"(\w+).html\">(\w+)</a>")
+    RE_CLASS_LINK=re.compile(r"<a href=\"(\w+).html\">([\w&;]+)</a>")
     RE_METHOD_LINK=re.compile(r"<a href=\"(\w+).html\#([\w\-\.]+)\">(\w+)</a>")
 
     #  These classes seem to be missing from the online docs.
@@ -1077,6 +1075,9 @@ class TypeDB(object):
         try:
             self.logger.info("reading Qt API: %s",url)
             f = urllib2.urlopen(url)
+            if f.geturl() != url:
+                msg = "not found: " + url
+                raise urllib2.HTTPError(url,"404",msg,{},None)
             data = f.read()
         except urllib2.HTTPError, e:
             if "404" in str(e) and cachefile404 is not None:
@@ -1094,8 +1095,15 @@ class TypeDB(object):
     def _get_linked_classes(self,data):
         """Extract all class names linked to from the given HTML data."""
         for match in self.RE_CLASS_LINK.finditer(data):
-            if match.group(1) == match.group(2).lower():
-                yield match.group(2)
+            #  Careful now, it might inherit from an instantiated template
+            #  type, e.g. QList<QItemSelectionRange>.  We just yield both
+            #  the template type and its argument.
+            if match.group(1) in match.group(2).lower():
+                if "&lt;" not in match.group(2):
+                    yield match.group(2)
+                else:
+                    yield match.group(2).split("&lt;")[0]
+                    yield match.group(2).split("&lt;")[1].split("&gt;")[0]
 
     def _get_linked_methods(self,data):
         """Extract all method names linked to from the given HTML data."""
@@ -1115,10 +1123,21 @@ class TypeDB(object):
             if classnm == "T":
                 #  This appears as a generic template type variable
                 pass
+            elif classnm == "RawHeader":
+                yield "QPair"
+                yield "QByteArray"
+            elif classnm == "Event":
+                yield "QPair"
+                yield "QEvent"
+                yield "QWidget"
             elif classnm.endswith("List"):
                 #  These are usually typedefs for a QList<T>
-                yield classnm[:-4]
-                yield "QList"
+                found_classes = False
+                for cclassnm in self._canonical_class_names(classnm[:-4]):
+                    found_classes = True
+                    yield cclassnm
+                if found_classes:
+                    yield "QList"
 
     def iterclasses(self):
         """Iterator over all available class names."""
@@ -1138,9 +1157,9 @@ class TypeDB(object):
         if classnm in self.MISSING_CLASSES:
             return True
         try:
-            self._read_url(classnm.lower()+"-members.html")
+            self._read_url(classnm.lower()+".html")
         except urllib2.HTTPError, e:
-            if "404" not in str(e):
+            if "404" not in str(e) and "300" not in str(e):
                 raise
             return False
         else:
@@ -1174,12 +1193,18 @@ class TypeDB(object):
                 for methnm in self.itermethods(sclassnm):
                     yield methnm
             return
-        docstr = self._read_url(classnm.lower()+"-members.html")
-        for ln in docstr.split("\n"):
-            ln = ln.strip()
-            if ln.startswith("<li class=\"fn\">"):
-                for methnm in self._get_linked_methods(ln):
-                    yield methnm
+        try:
+            docstr = self._read_url(classnm.lower()+"-members.html")
+        except urllib2.HTTPError, e:
+            if "404" not in str(e):
+                raise
+            assert self.isclass(classnm), "%r is not a class" % (classnm,)
+        else:
+            for ln in docstr.split("\n"):
+                ln = ln.strip()
+                if ln.startswith("<li class=\"fn\">"):
+                    for methnm in self._get_linked_methods(ln):
+                        yield methnm
 
     def relatedtypes(self,classnm,methnm):
         """Get all possible return types for a method.
