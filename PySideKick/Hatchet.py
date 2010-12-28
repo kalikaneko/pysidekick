@@ -865,17 +865,17 @@ class Hatchet(object):
             the rpath from sourcefile to destfile.
             """
             rpath = None
-            for ln in _bt("readelf","-d",srcfile):
+            for ln in _bt("readelf","-d",srcfile).split("\n"):
                 if "RPATH" in ln and "Library rpath:" in ln:
-                    rpath = ln.rsplit("[",1).split("]",0)
+                    rpath = ln.rsplit("[",1)[1].split("]",1)[0]
                     break
             if rpath is None:
-                for ln in _bt("readelf","-d",srcfile):
+                for ln in _bt("readelf","-d",srcfile).split("\n"):
                     if "RUNPATH" in ln and "Library runpath:" in ln:
-                        rpath = ln.rsplit("[",1).split("]",0)
+                        rpath = ln.rsplit("[",1)[1].split("]",1)[0]
                         break
             if rpath is not None:
-                do("patchelf","--set-rpath",rpath,dstfile)
+                _do("patchelf","--set-rpath",rpath,dstfile)
 
 
 def get_cache_dir(*paths):
