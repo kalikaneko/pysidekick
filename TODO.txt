@@ -1,7 +1,2 @@
 
 
-  Hatchet:
-
-      * try to build against a static Qt, see how much that lets
-        us strip out of the combined binary size
-
