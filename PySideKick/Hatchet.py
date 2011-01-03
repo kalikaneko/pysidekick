@@ -401,7 +401,6 @@ class Hatchet(object):
                 #  that have a pure virtual override somewhere in the
                 #  inheritence chain.
                 #  TODO: is this just superstition on my part?
-                continue
                 for sclassnm in self.typedb.superclasses(classnm):
                     if self.typedb.ispurevirtual(sclassnm,methnm):
                         self.logger.debug("keeping method: %s::%s",classnm,
