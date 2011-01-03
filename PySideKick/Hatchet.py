@@ -98,11 +98,8 @@ KEEP_METHODS = {
          )),
     "QBitArray": set(("setBit",)),
     "QByteArray": set(("insert",)),
-    #"QPixmap": ("*",),
-    #"QImage": ("*",),
-    #"QPicture": ("*",),
-    #"QX11Info": ("*",),
 }
+
 
 #  These are protected methods, and win32 can't use the "protected hack"
 #  to access them so we are forced to generate the bindings.
@@ -122,7 +119,7 @@ class Hatchet(object):
     """Class for hacking unused code out of the PySide binaries.
 
     A Hatchet object controls what and how to hack things out of the PySide
-    binaries for a frozen module.  It must be given a path to a directory
+    binaries for a frozen application.  It must be given a path to a directory
     containing a frozen PySide application.  When you call the hack() method
     it will:
 
@@ -149,7 +146,7 @@ class Hatchet(object):
     You can adjust the modules searched for Qt identifiers by calling
     the following methods:
 
-        * add_file:        directly add a *.py or *.pyc file
+        * add_file:        directly add a .py or .pyc file
         * add_directory:   add the entire contents of a directory
         * add_zipfile:     add the entire contents of a zipfile
 
@@ -402,9 +399,9 @@ class Hatchet(object):
             else:
                 #  Shiboken doesn't like it when we reject methods
                 #  that have a pure virtual override somewhere in the
-                #  inheritence chain.  This should probably be fixed
-                #  in shiboken, but we work around it for now.
+                #  inheritence chain.
                 #  TODO: is this just superstition on my part?
+                continue
                 for sclassnm in self.typedb.superclasses(classnm):
                     if self.typedb.ispurevirtual(sclassnm,methnm):
                         self.logger.debug("keeping method: %s::%s",classnm,
