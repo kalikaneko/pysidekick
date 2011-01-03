@@ -186,7 +186,7 @@ class Hatchet(object):
             self.build_pyside_source(sourcedir)
             self.copy_hacked_pyside_modules(sourcedir,self.appdir)
         finally:
-            shutil.rmtree(tdir)
+            pass #shutil.rmtree(tdir)
 
     def add_script(self,pathname,follow_imports=True):
         """Add an additional script for the frozen application.
@@ -744,9 +744,11 @@ class Hatchet(object):
             cxxflags = sysconfig.get_config_var("CFLAGS") or ""
             cxxflags += " " + env.get("CXXFLAGS","")
             if sys.platform != "win32":
-                cxxflags += " -fno-exceptions -Wl,--gc-sections"
+                cxxflags += " -fno-exceptions"
+            if "linux" in sys.platform:
+                cxxflags += " -Wl,--gc-sections"
             env["CXXFLAGS"] = cxxflags
-            #  These are required for static linkig on linux
+            #  These are required for static linking on linux
             #if sys.platform not in ("win32","darwin",):
             #    ldflags = sysconfig.get_config_var("LDFLAGS")
             #    ldflags += " " + env.get("LDFLAGS","")
@@ -819,10 +821,14 @@ class Hatchet(object):
                 if newfilepath is not None:
                     self.copy_linker_paths(filepath,newfilepath)
                     self.logger.info("copying %r => %r",newfilepath,filepath)
+                    print "COPYING %r => %r" % (newfilepath,filepath,)
                     os.unlink(filepath)
                     shutil.copy2(newfilepath,filepath)
                     if sys.platform != "win32":
-                        _do("strip",filepath)
+                        try:
+                            _do("strip",filepath)
+                        except subprocess.CalledProcessError:
+                            pass
 
     if sys.platform == "darwin":
         def copy_linker_paths(self,srcfile,dstfile):
