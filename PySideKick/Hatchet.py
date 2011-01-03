@@ -823,7 +823,7 @@ class Hatchet(object):
                     print "COPYING %r => %r" % (newfilepath,filepath,)
                     os.unlink(filepath)
                     shutil.copy2(newfilepath,filepath)
-                    if sys.platform != "win32":
+                    if "linux" in sys.platform:
                         try:
                             _do("strip",filepath)
                         except subprocess.CalledProcessError:
