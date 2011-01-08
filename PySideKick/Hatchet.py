@@ -829,6 +829,11 @@ class Hatchet(object):
                             _do("strip",filepath)
                         except subprocess.CalledProcessError:
                             pass
+                    elif sys.platform == "darwin":
+                        try:
+                            _do("strip","-S","-x",filepath)
+                        except subprocess.CalledProcessError:
+                            pass
 
     if sys.platform == "darwin":
         def copy_linker_paths(self,srcfile,dstfile):
