@@ -747,12 +747,13 @@ class Hatchet(object):
             if "linux" in sys.platform:
                 cxxflags += " -Wl,--gc-sections"
             env["CXXFLAGS"] = cxxflags
-            #  These are required for static linking on linux
-            #if sys.platform not in ("win32","darwin",):
-            #    ldflags = sysconfig.get_config_var("LDFLAGS")
-            #    ldflags += " " + env.get("LDFLAGS","")
-            #    ldflags += " --gc-sections -lpthread -lrt -lz -ldl lQtNetwork -lQtCore -ljpeg -ltiff -lpng14 -lz -lX11 -lXrender -lXrandr -lXext -lfontconfig -lSM -lICE"
-            #    env["LDFLAGS"] = ldflags
+            if "linux" in sys.platform:
+                ldflags = sysconfig.get_config_var("LDFLAGS")
+                ldflags += " " + env.get("LDFLAGS","")
+                #  These are required for static linking on linux
+                #ldflags += " -lpthread -lrt -lz -ldl lQtNetwork -lQtCore -ljpeg -ltiff -lpng14 -lz -lX11 -lXrender -lXrandr -lXext -lfontconfig -lSM -lICE"
+                ldflags += " --gc-sections"
+                env["LDFLAGS"] = ldflags
             cmd = ["cmake",
                    "-DCMAKE_BUILD_TYPE=MinSizeRel",
                    "-DCMAKE_VERBOSE_MAKEFILE=ON",
