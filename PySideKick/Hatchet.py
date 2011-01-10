@@ -71,7 +71,7 @@ from distutils import sysconfig
 
 #  Download details for the latest PySide release.
 PYSIDE_SOURCE_MD5 = "71869b10d0562d8f5a2761d2fb298677"
-PYSIDE_SOURCE_URL = "http://www.pyside.org/files/pyside-qt4.7+1.0.0~beta2.tar.bz2"
+PYSIDE_SOURCE_URL = "http://www.pyside.org/files/pyside-qt4.7+1.0.0~beta3.tar.bz2"
 
 
 #  Classes that must not be hacked out of the PySide binary.
