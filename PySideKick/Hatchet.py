@@ -326,17 +326,22 @@ class Hatchet(object):
         used_ids = set()
         for m in self.mf.modules.itervalues():
             if m.__code__ is not None:
+                self.logger.debug("examining code: %s",m)
                 self.find_identifiers_in_code(m.__code__,used_ids)
         #  Keep all classes used directly in code.
         for classnm in self.typedb.iterclasses():
-            if classnm in used_ids or classnm in KEEP_CLASSES:
-                self.logger.debug("keeping class: %s",classnm)
+            if classnm in used_ids:
+                self.logger.debug("keeping class: %s [used]",classnm)
+                self.keep_classes.add(classnm)
+            if classnm in KEEP_CLASSES:
+                self.logger.debug("keeping class: %s [pinned]",classnm)
                 self.keep_classes.add(classnm)
         #  Keep all superclasses of all kept classes
         for classnm in list(self.keep_classes):
             for sclassnm in self.typedb.superclasses(classnm):
                 if sclassnm not in self.keep_classes:
-                    self.logger.debug("keeping class: %s",sclassnm)
+                    msg = "keeping class: %s [sup %s]"
+                    self.logger.debug(msg,sclassnm,classnm)
                     self.keep_classes.add(sclassnm)
         #  Now iteratively expand the kept classess with possible return types
         #  of any methods called on the kept classes.
@@ -355,7 +360,8 @@ class Hatchet(object):
                 for rtype in self.typedb.relatedtypes(classnm,methnm):
                     for sclassnm in self.typedb.superclasses(rtype):
                         if sclassnm not in self.keep_classes:
-                            self.logger.debug("keeping class: %s",sclassnm)
+                            msg = "keeping class: %s [rtyp %s::%s]"
+                            self.logger.debug(msg,sclassnm,classnm,methnm)
                             self.keep_classes.add(sclassnm)
                             todo_classes.append(sclassnm)
 
@@ -374,28 +380,28 @@ class Hatchet(object):
             if methnm in kept_methods:
                 continue
             if methnm in used_ids:
-                self.logger.debug("keeping method: %s::%s",classnm,methnm)
+                self.logger.debug("keeping method: %s::%s [used]",classnm,methnm)
                 kept_methods.add(methnm)
             elif methnm + "_" in used_ids:
-                self.logger.debug("keeping method: %s::%s",classnm,methnm)
+                self.logger.debug("keeping method: %s::%s [used]",classnm,methnm)
                 kept_methods.add(methnm)
             elif methnm == classnm:
-                self.logger.debug("keeping method: %s::%s",classnm,methnm)
+                self.logger.debug("keeping method: %s::%s [cons]",classnm,methnm)
                 kept_methods.add(methnm)
             elif "*" in kept_methods:
-                self.logger.debug("keeping method: %s::%s",classnm,methnm)
+                self.logger.debug("keeping method: %s::%s [star]",classnm,methnm)
                 kept_methods.add(methnm)
             elif methnm in self.keep_methods.get("*",()):
-                self.logger.debug("keeping method: %s::%s",classnm,methnm)
+                self.logger.debug("keeping method: %s::%s [star]",classnm,methnm)
                 kept_methods.add(methnm)
             elif methnm in KEEP_METHODS.get(classnm,()):
-                self.logger.debug("keeping method: %s::%s",classnm,methnm)
+                self.logger.debug("keeping method: %s::%s [pinned]",classnm,methnm)
                 kept_methods.add(methnm)
             elif "*" in KEEP_METHODS.get(classnm,()):
-                self.logger.debug("keeping method: %s::%s",classnm,methnm)
+                self.logger.debug("keeping method: %s::%s [pinned]",classnm,methnm)
                 kept_methods.add(methnm)
             elif methnm in KEEP_METHODS.get("*",()):
-                self.logger.debug("keeping method: %s::%s",classnm,methnm)
+                self.logger.debug("keeping method: %s::%s [pinned]",classnm,methnm)
                 kept_methods.add(methnm)
             else:
                 #  Shiboken doesn't like it when we reject methods
@@ -404,7 +410,7 @@ class Hatchet(object):
                 #  TODO: is this just superstition on my part?
                 for sclassnm in self.typedb.superclasses(classnm):
                     if self.typedb.ispurevirtual(sclassnm,methnm):
-                        self.logger.debug("keeping method: %s::%s",classnm,
+                        self.logger.debug("keeping method: %s::%s [virt]",classnm,
                                                                    methnm)
                         kept_methods.add(methnm)
                         break
@@ -500,7 +506,8 @@ class Hatchet(object):
                 self.logger.critical("bad MD5 for %r",cachefile)
                 self.logger.critical("    %s != %s",md5.hexdigest(),
                                                     PYSIDE_SOURCE_MD5)
-                raise RuntimeError("corrupted download: %s" % (url,))
+                msg = "corrupted download: %s" % (PYSIDE_SOURCE_URL,)
+                raise RuntimeError(msg)
         return cachefile
 
     def unpack_tarball(self,sourcefile,destdir):
@@ -557,7 +564,8 @@ class Hatchet(object):
                logger.debug("reject %s::%s",rej[0],rej[1])
                num_rejected_methods += 1
                reject_methods.setdefault(rej[0],set()).add(rej[1])
-        logger.info("rejecting %s classes, %d methods",len(reject_classes),
+        logger.info("keeping %d classes",len(self.keep_classes))
+        logger.info("rejecting %d classes, %d methods",len(reject_classes),
                                                       num_rejected_methods)
         #  Find each top-level module directory and patch the contained files.
         psdir = os.path.join(sourcedir,"PySide")
@@ -1301,9 +1309,13 @@ if __name__ == "__main__":
                   help="follow import when loading code",
                   default=True)
     op.add_option("","--no-follow-imports",
-                  action="store_true",
+                  action="store_false",
                   help="don't follow imports when loading code",
                   dest="follow_imports")
+    op.add_option("","--analyse-only",
+                  action="store_true",
+                  help="just analyse the code, don't hack it",
+                  dest="analyse_only")
     (opts,args) = op.parse_args()
     try:
         opts.debugs = int(opts.debug)
@@ -1324,11 +1336,29 @@ if __name__ == "__main__":
     for fnm in args[1:]:
         if os.path.isdir(fnm):
             h.add_directory(fnm,follow_imports=opts.follow_imports)
-        if fnm.endswith(".zip") or nm.endswith(".exe"):
+        if fnm.endswith(".zip") or fnm.endswith(".exe"):
             h.add_zipfile(fnm,follow_imports=opts.follow_imports)
         else:
             h.add_file(fnm,follow_imports=opts.follow_imports)
-    h.hack()
+    if not opts.analyse_only:
+        h.hack()
+    else:
+        logger = logging.getLogger("PySideKick.Hatchet")
+        if not h.mf.modules:
+            h.add_directory(h.appdir)
+        num_rejected_classes = 0
+        num_rejected_methods = 0
+        for rej in h.find_rejections():
+            if len(rej) == 1:
+               logger.debug("reject %s",rej[0])
+               num_rejected_classes += 1
+            else:
+               logger.debug("reject %s::%s",rej[0],rej[1])
+               num_rejected_methods += 1
+        logger.info("keeping %d classes",len(h.keep_classes))
+        logger.info("rejecting %d classes, %d methods",num_rejected_classes,
+                                                       num_rejected_methods)
+
     sys.exit(0)
 
 
