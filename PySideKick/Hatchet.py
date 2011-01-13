@@ -749,18 +749,18 @@ class Hatchet(object):
             cxx = sysconfig.get_config_var("CXX")
             if cxx is not None:
                 env.setdefault("CXX",cxx)
-            cxxflags = sysconfig.get_config_var("CFLAGS") or ""
-            cxxflags += " " + env.get("CXXFLAGS","")
+            cxxflags = env.get("CXXFLAGS","")
+            cxxflags += " " + (sysconfig.get_config_var("CFLAGS") or "")
             if sys.platform != "win32":
                 cxxflags += " -fno-exceptions"
             if "linux" in sys.platform:
                 cxxflags += " -Wl,--gc-sections"
             env["CXXFLAGS"] = cxxflags
             if "linux" in sys.platform:
-                ldflags = sysconfig.get_config_var("LDFLAGS")
-                ldflags += " " + env.get("LDFLAGS","")
+                ldflags = env.get("LDFLAGS","")
+                ldflags += " " + sysconfig.get_config_var("LDFLAGS")
                 #  These are required for static linking on linux
-                #ldflags += " -lpthread -lrt -lz -ldl lQtNetwork -lQtCore -ljpeg -ltiff -lpng14 -lz -lX11 -lXrender -lXrandr -lXext -lfontconfig -lSM -lICE"
+                ldflags += " -lpthread -lrt -lz -ldl -lQtNetwork -lQtCore -ljpeg -ltiff -lpng14 -lz -lX11 -lXrender -lXrandr -lXext -lfontconfig -lSM -lICE"
                 ldflags += " --gc-sections"
                 env["LDFLAGS"] = ldflags
             cmd = ["cmake",
