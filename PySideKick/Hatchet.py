@@ -98,6 +98,7 @@ KEEP_METHODS = {
          )),
     "QBitArray": set(("setBit",)),
     "QByteArray": set(("insert",)),
+    "QFileDialog": set(("*",)),
 }
 
 
