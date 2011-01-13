@@ -70,7 +70,7 @@ from distutils import sysconfig
 
 
 #  Download details for the latest PySide release.
-PYSIDE_SOURCE_MD5 = "71869b10d0562d8f5a2761d2fb298677"
+PYSIDE_SOURCE_MD5 = "1dfe39bb3a5f5f0cc2c49252c33fabe5"
 PYSIDE_SOURCE_URL = "http://www.pyside.org/files/pyside-qt4.7+1.0.0~beta3.tar.bz2"
 
 
