@@ -70,8 +70,8 @@ from distutils import sysconfig
 
 
 #  Download details for the latest PySide release.
-PYSIDE_SOURCE_MD5 = "1dfe39bb3a5f5f0cc2c49252c33fabe5"
-PYSIDE_SOURCE_URL = "http://www.pyside.org/files/pyside-qt4.7+1.0.0~beta3.tar.bz2"
+PYSIDE_SOURCE_MD5 = "4ac584802fba7cbbe41182311cf40808"
+PYSIDE_SOURCE_URL = "http://www.pyside.org/files/pyside-qt4.7+1.0.0~beta4.tar.bz2"
 
 
 #  Classes that must not be hacked out of the PySide binary.
@@ -154,6 +154,9 @@ class Hatchet(object):
     If you don't call any of these methods, the contents of the given appdir
     will be used.
     """
+
+    SOURCE_URL = PYSIDE_SOURCE_URL
+    SOURCE_MD5 = PYSIDE_SOURCE_MD5
 
     def __init__(self,appdir,mf=None,typedb=None,logger=None):
         self.appdir = appdir
@@ -305,11 +308,12 @@ class Hatchet(object):
                     except (zipfile.BadZipfile,):
                         pass
                 else:
-                    try:
-                        if "executable" in _bt("file",subpath):
-                            self.add_zipfile(subpath,**rkwds)
-                    except (EnvironmentError,zipfile.BadZipfile,):
-                        pass
+                    if sys.platform != "win32":
+                        try:
+                            if "executable" in _bt("file",subpath):
+                                self.add_zipfile(subpath,**rkwds)
+                        except (EnvironmentError,zipfile.BadZipfile,):
+                            pass
 
     def expand_kept_classes(self):
         """Find classes and methods that might be used by the application.
@@ -467,7 +471,7 @@ class Hatchet(object):
         used as a fallback location.
         """
         cachedir = get_cache_dir("Hatchet","src")
-        nm = os.path.basename(urlparse.urlparse(PYSIDE_SOURCE_URL).path)
+        nm = os.path.basename(urlparse.urlparse(self.SOURCE_URL).path)
         if cachedir is None:
             (fd,cachefile) = tempfile.mkstemp()
             os.close(fd)
@@ -475,40 +479,38 @@ class Hatchet(object):
             #  Use cached version if it has correct md5.
             cachefile = os.path.join(cachedir,nm)
             if os.path.exists(cachefile):
-                md5 = hashlib.md5()
-                with open(cachefile,"rb") as f:
-                    data = f.read(1024*32)
-                    while data:
-                        md5.update(data)
-                        data = f.read(1024*32)
-                if md5.hexdigest() != PYSIDE_SOURCE_MD5:
-                    self.logger.warn("bad MD5 for %r",cachefile)
-                    self.logger.warn("    %s != %s",md5.hexdigest(),
-                                                    PYSIDE_SOURCE_MD5)
+                if not self._check_pyside_source_md5(cachefile):
                     os.unlink(cachefile)
         #  Download if we can't use the cached version
         if cachedir is None or not os.path.exists(cachefile):
-            self.logger.info("downloading %s",PYSIDE_SOURCE_URL)
-            fIn = urllib2.urlopen(PYSIDE_SOURCE_URL)
+            self.logger.info("downloading %s",self.SOURCE_URL)
+            fIn = urllib2.urlopen(self.SOURCE_URL)
             try:
                  with open(cachefile,"wb") as fOut:
                     shutil.copyfileobj(fIn,fOut)
             finally:
                 fIn.close()
-            #  Verify the download
-            md5 = hashlib.md5()
-            with open(cachefile,"rb") as f:
-                data = f.read(1024*32)
-                while data:
-                    md5.update(data)
-                    data = f.read(1024*32)
-            if md5.hexdigest() != PYSIDE_SOURCE_MD5:
-                self.logger.critical("bad MD5 for %r",cachefile)
-                self.logger.critical("    %s != %s",md5.hexdigest(),
-                                                    PYSIDE_SOURCE_MD5)
+            if not self._check_pyside_source_md5(cachefile):
                 msg = "corrupted download: %s" % (PYSIDE_SOURCE_URL,)
                 raise RuntimeError(msg)
         return cachefile
+
+    def _check_pyside_source_md5(self,cachefile):
+        """Check the MD5 of a downloaded source file."""
+        if self.SOURCE_MD5 is None:
+            return True
+        md5 = hashlib.md5()
+        with open(cachefile,"rb") as f:
+            data = f.read(1024*32)
+            while data:
+                md5.update(data)
+                data = f.read(1024*32)
+        if md5.hexdigest() != self.SOURCE_MD5:
+            self.logger.critical("bad MD5 for %r",cachefile)
+            self.logger.critical("    %s != %s",md5.hexdigest(),
+                                                self.SOURCE_MD5)
+            return False
+        return True
 
     def unpack_tarball(self,sourcefile,destdir):
         """Unpack the given tarball into the given directory.
@@ -809,8 +811,8 @@ class Hatchet(object):
                         if filenm.endswith(modnm):
                             newfilepath = os.path.join(psdir,modnm)
                             break
-                #  If it's the pyside, replace that as well
-                elif "pyside." in filenm:
+                #  If it's the pyside support lib, replace that as well
+                elif "libpyside" in filenm:
                     newfilepath = os.path.join(sourcedir,"libpyside",filenm)
                     if not os.path.exists(newfilepath):
                         newfilepath = None
@@ -830,7 +832,6 @@ class Hatchet(object):
                 if newfilepath is not None:
                     self.copy_linker_paths(filepath,newfilepath)
                     self.logger.info("copying %r => %r",newfilepath,filepath)
-                    print "COPYING %r => %r" % (newfilepath,filepath,)
                     os.unlink(filepath)
                     shutil.copy2(newfilepath,filepath)
                     if "linux" in sys.platform:
@@ -1302,7 +1303,7 @@ if __name__ == "__main__":
     usage = "usage: Hatchet [options] /path/to/frozen/app [extra files]"
     op = optparse.OptionParser(usage=usage)
     op.add_option("-d","--debug",default="DEBUG",
-                  help="set the loggin debug level")
+                  help="set the logging debug level")
     op.add_option("","--follow-imports",
                   action="store_true",
                   dest="follow_imports",
