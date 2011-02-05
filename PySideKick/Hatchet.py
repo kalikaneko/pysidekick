@@ -70,8 +70,8 @@ from distutils import sysconfig
 
 
 #  Download details for the latest PySide release.
-PYSIDE_SOURCE_MD5 = "4ac584802fba7cbbe41182311cf40808"
-PYSIDE_SOURCE_URL = "http://www.pyside.org/files/pyside-qt4.7+1.0.0~beta4.tar.bz2"
+PYSIDE_SOURCE_MD5 = "d6d7eae6744875fcf9862a827ab6c4aa"
+PYSIDE_SOURCE_URL = "http://www.pyside.org/files/pyside-qt4.7+1.0.0~beta5.tar.bz2"
 
 
 #  Classes that must not be hacked out of the PySide binary.
@@ -812,7 +812,11 @@ class Hatchet(object):
                             newfilepath = os.path.join(psdir,modnm)
                             break
                 #  If it's the pyside support lib, replace that as well
-                elif "libpyside" in filenm:
+                elif filenm.startswith("libpyside"):
+                    newfilepath = os.path.join(sourcedir,"libpyside",filenm)
+                    if not os.path.exists(newfilepath):
+                        newfilepath = None
+                elif filenm.startswith("pyside") and filenm.endswith(".dll"):
                     newfilepath = os.path.join(sourcedir,"libpyside",filenm)
                     if not os.path.exists(newfilepath):
                         newfilepath = None
