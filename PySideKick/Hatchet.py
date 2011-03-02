@@ -64,14 +64,21 @@ import urllib2
 import hashlib
 import subprocess
 import logging
+import inspect
 from xml.dom import minidom
 from collections import deque
 from distutils import sysconfig
+from textwrap import dedent
 
+import PySideKick
 
 #  Download details for the latest PySide release.
-PYSIDE_SOURCE_MD5 = "d6d7eae6744875fcf9862a827ab6c4aa"
-PYSIDE_SOURCE_URL = "http://www.pyside.org/files/pyside-qt4.7+1.0.0~beta5.tar.bz2"
+PYSIDE_SOURCE_MD5 = "cf54bc5eacc3132c2b720543fca9c83e"
+PYSIDE_SOURCE_URL = "http://www.pyside.org/files/pyside-qt4.7+1.0.0~rc1.tar.bz2"
+
+
+#  Name of file used to mark cached build directories
+BUILD_OK_MARKER = "PySideKick.Hatchet.Built.txt"
 
 
 #  Classes that must not be hacked out of the PySide binary.
@@ -141,7 +148,7 @@ class Hatchet(object):
         * typedb:         a TypeDB instance used to get information about
                           the classes and methods available in PySide.
         * keep_classes:   a set of class names that must not be removed.
-        * keep_methods:   a dict maaping class names to methods on those 
+        * keep_methods:   a dict mapping class names to methods on those 
                           classes that must not be removed.
 
     You can adjust the modules searched for Qt identifiers by calling
@@ -182,15 +189,38 @@ class Hatchet(object):
         """
         if not self.mf.modules:
             self.add_directory(self.appdir)
-        tdir = tempfile.mkdtemp()
+        self.analyse_code()
+        #  Try to use a cached build if possible.
+        #  We use a hash of the build parameters to identify the correct dir.
+        fp = self.get_build_fingerprint()
+        remove_builddir = False
+        builddir = get_cache_dir("Hatchet","build",fp)
+        if builddir is None:
+            remove_builddir = True
+            builddir = tempfile.mkdtemp()
         try:
-            sourcefile = self.fetch_pyside_source()
-            sourcedir = self.unpack_tarball(sourcefile,tdir)
-            self.hack_pyside_source(sourcedir)
-            self.build_pyside_source(sourcedir)
+            self.logger.debug("building PySide in %r",builddir)
+            if os.path.exists(os.path.join(builddir,BUILD_OK_MARKER)):
+                nm = os.listdir(builddir)[0]
+                sourcedir = os.path.join(builddir,nm)
+                self.logger.debug("using cached builddir: %r",sourcedir)
+            else:
+                sourcefile = self.fetch_pyside_source()
+                sourcedir = self.unpack_tarball(sourcefile,builddir)
+                self.hack_pyside_source(sourcedir)
+                self.build_pyside_source(sourcedir)
+                with open(os.path.join(builddir,BUILD_OK_MARKER),"wt") as f:
+                    f.write(dedent("""
+                    This PySide directory was built using PySideKick.Hatchet.
+                    Don't use it for a regular install of PySide.
+                    """))
             self.copy_hacked_pyside_modules(sourcedir,self.appdir)
+        except:
+            remove_builddir = True
+            raise
         finally:
-            pass #shutil.rmtree(tdir)
+            if remove_builddir:
+                shutil.rmtree(builddir)
 
     def add_script(self,pathname,follow_imports=True):
         """Add an additional script for the frozen application.
@@ -315,6 +345,15 @@ class Hatchet(object):
                         except (EnvironmentError,zipfile.BadZipfile,):
                             pass
 
+    def analyse_code(self):
+        """Analyse the code of the frozen application.
+
+        This is the top-level method to start the code analysis process.
+        It must be called after adding any extra files or directories, and
+        before attempting to hack up a new version of PySide.
+        """
+        self.expand_kept_classes()
+
     def expand_kept_classes(self):
         """Find classes and methods that might be used by the application.
 
@@ -383,39 +422,39 @@ class Hatchet(object):
         for methnm in self.typedb.itermethods(classnm):
             if methnm in kept_methods:
                 continue
+            msg = "keeping method: %s::%s [%s]"
             if methnm in used_ids:
-                self.logger.debug("keeping method: %s::%s [used]",classnm,methnm)
+                self.logger.debug(msg,classnm,methnm,"used")
                 kept_methods.add(methnm)
             elif methnm + "_" in used_ids:
-                self.logger.debug("keeping method: %s::%s [used]",classnm,methnm)
+                self.logger.debug(msg,classnm,methnm,"used")
                 kept_methods.add(methnm)
             elif methnm == classnm:
-                self.logger.debug("keeping method: %s::%s [cons]",classnm,methnm)
+                self.logger.debug(msg,classnm,methnm,"constructor")
                 kept_methods.add(methnm)
             elif "*" in kept_methods:
-                self.logger.debug("keeping method: %s::%s [star]",classnm,methnm)
+                self.logger.debug(msg,classnm,methnm,"star")
                 kept_methods.add(methnm)
             elif methnm in self.keep_methods.get("*",()):
-                self.logger.debug("keeping method: %s::%s [star]",classnm,methnm)
+                self.logger.debug(msg,classnm,methnm,"star")
                 kept_methods.add(methnm)
             elif methnm in KEEP_METHODS.get(classnm,()):
-                self.logger.debug("keeping method: %s::%s [pinned]",classnm,methnm)
+                self.logger.debug(msg,classnm,methnm,"pinned")
                 kept_methods.add(methnm)
             elif "*" in KEEP_METHODS.get(classnm,()):
-                self.logger.debug("keeping method: %s::%s [pinned]",classnm,methnm)
+                self.logger.debug(msg,classnm,methnm,"pinned")
                 kept_methods.add(methnm)
             elif methnm in KEEP_METHODS.get("*",()):
-                self.logger.debug("keeping method: %s::%s [pinned]",classnm,methnm)
+                self.logger.debug(msg,classnm,methnm,"pinned")
                 kept_methods.add(methnm)
             else:
+                #  TODO: is this just superstition on my part?
                 #  Shiboken doesn't like it when we reject methods
                 #  that have a pure virtual override somewhere in the
                 #  inheritence chain.
-                #  TODO: is this just superstition on my part?
                 for sclassnm in self.typedb.superclasses(classnm):
                     if self.typedb.ispurevirtual(sclassnm,methnm):
-                        self.logger.debug("keeping method: %s::%s [virt]",classnm,
-                                                                   methnm)
+                        self.logger.debug(msg,classnm,methnm,"virtual")
                         kept_methods.add(methnm)
                         break
         return kept_methods
@@ -430,7 +469,6 @@ class Hatchet(object):
         and the form ("ClassName","methodName",) for useless methods on
         otherwise useful classes.
         """
-        self.expand_kept_classes()
         for classnm in self.typedb.iterclasses():
             if classnm not in self.keep_classes:
                 yield (classnm,)
@@ -520,7 +558,7 @@ class Hatchet(object):
         first directory that contains an actual file.  This is usually the
         directory you want for e.g. building a source distribution.
         """
-        self.logger.info("unpacking %r",sourcefile)
+        self.logger.info("unpacking %r => %r",sourcefile,destdir)
         tf = tarfile.open(sourcefile,"r:*")
         if not destdir.endswith(os.path.sep):
             destdir += os.path.sep
@@ -673,7 +711,7 @@ class Hatchet(object):
         This method allows easy patching of a build file by applying a
         python function.
 
-        The specified "pathfunc" must be a line filtering function - it takes
+        The specified "patchfunc" must be a line filtering function - it takes
         as input the sequence of lines from the file, and outputs a modified
         sequence of lines.
         """
@@ -703,7 +741,7 @@ class Hatchet(object):
         This method allows easy patching of a build file by applying a
         python function.
 
-        The specified "pathfunc" must be an xml filtering function - it takes
+        The specified "patchfunc" must be an xml filtering function - it takes
         as input a DOM object and returns a modified DOM.
         """
         filepath = os.path.join(*paths)
@@ -745,26 +783,7 @@ class Hatchet(object):
             #  We also try to use compiler options from python so that the
             #  libs will match as closely as possible.
             env = os.environ.copy()
-            cc = sysconfig.get_config_var("CC")
-            if cc is not None:
-                env.setdefault("CC",cc)
-            cxx = sysconfig.get_config_var("CXX")
-            if cxx is not None:
-                env.setdefault("CXX",cxx)
-            cxxflags = env.get("CXXFLAGS","")
-            cxxflags += " " + (sysconfig.get_config_var("CFLAGS") or "")
-            if sys.platform != "win32":
-                cxxflags += " -fno-exceptions"
-            if "linux" in sys.platform:
-                cxxflags += " -Wl,--gc-sections"
-            env["CXXFLAGS"] = cxxflags
-            if "linux" in sys.platform:
-                ldflags = env.get("LDFLAGS","")
-                ldflags += " " + sysconfig.get_config_var("LDFLAGS")
-                #  These are required for static linking on linux
-                ldflags += " -lpthread -lrt -lz -ldl -lQtNetwork -lQtCore -ljpeg -ltiff -lpng14 -lz -lX11 -lXrender -lXrandr -lXext -lfontconfig -lSM -lICE"
-                ldflags += " --gc-sections"
-                env["LDFLAGS"] = ldflags
+            env = self.get_build_env(env)
             cmd = ["cmake",
                    "-DCMAKE_BUILD_TYPE=MinSizeRel",
                    "-DCMAKE_VERBOSE_MAKEFILE=ON",
@@ -777,7 +796,7 @@ class Hatchet(object):
                    "-DCMAKE_INSTALL_PREFIX="+env["CMAKE_INSTALL_PREFIX"]
                 )
             subprocess.check_call(cmd,env=env)
-            #  but the actual build program is "nmake" on win32
+            #  The actual build program is "nmake" on win32
             if sys.platform == "win32":
                 cmd = ["nmake"]
             else:
@@ -786,8 +805,73 @@ class Hatchet(object):
         finally:
             os.chdir(olddir)
 
+    def get_build_env(self,env=None):
+        """Get environment variables for the build."""
+        if env is None:
+            env = {}
+        def get_config_var(nm):
+            val = sysconfig.get_config_var(nm)
+            if val is None:
+                val = os.environ.get(nm)
+            return val
+        cc = get_config_var("CC")
+        if cc is not None:
+            env.setdefault("CC",cc)
+        cxx = get_config_var("CXX")
+        if cxx is not None:
+            env.setdefault("CXX",cxx)
+        cflags = get_config_var("CFLAGS")
+        if cflags is not None:
+            env.setdefault("CFLAGS",cflags)
+        cxxflags = env.get("CXXFLAGS",os.environ.get("CXXFLAGS",""))
+        cxxflags += " " + (sysconfig.get_config_var("CFLAGS") or "")
+        if sys.platform != "win32":
+            cxxflags += " -fno-exceptions"
+        if "linux" in sys.platform:
+            cxxflags += " -Wl,--gc-sections"
+        env["CXXFLAGS"] = cxxflags
+        if "linux" in sys.platform:
+            ldflags = env.get("LDFLAGS",os.environ.get("LDFLAGS",""))
+            ldflags += " " + sysconfig.get_config_var("LDFLAGS")
+            #  These are required for static linking on linux
+            ldflags += " -lpthread -lrt -lz -ldl -lQtNetwork -lQtCore -ljpeg -ltiff -lpng14 -lz -lX11 -lXrender -lXrandr -lXext -lfontconfig -lSM -lICE"
+            ldflags += " --gc-sections"
+            env["LDFLAGS"] = ldflags
+        return env
+
+    def get_build_fingerprint(self):
+        """Get a unique fingerprint identifying all our build parameters.
+
+        This method produces a unique fingerprint (actually an md5 hash) for
+        the full set of build parameters used in this Hatchet object.  This
+        includes the PySide and PySideKick version, list of rejections, and
+        build flags.
+        """
+        fp = hashlib.md5()
+        #  Include info about python, pyside and pysidekick
+        fp.update(sys.version)
+        fp.update(sys.platform)
+        fp.update(sys.executable)
+        fp.update(self.SOURCE_URL)
+        fp.update(self.SOURCE_MD5)
+        fp.update(PySideKick.__version__)
+        try:
+            fp.update(inspect.getsource(sys.modules[__name__]))
+        except (NameError,KeyError,):
+            pass
+        #  Include info about the build environment
+        for (k,v) in sorted(self.get_build_env().items()):
+            fp.update(k)
+            fp.update(v)
+        #  Include info about the rejections used
+        #  OK, I think that should cover it...
+        for rej in self.find_rejections():
+            fp.update(str(rej))
+        return fp.hexdigest()
+
     def copy_hacked_pyside_modules(self,sourcedir,destdir):
         """Copy PySide modules from build dir back into the frozen app."""
+        self.logger.debug("copying modules from %r => %r",sourcedir,destdir)
         def is_dll(nm):
             if nm.endswith(".so"):
                 return True
@@ -1353,6 +1437,7 @@ if __name__ == "__main__":
             h.add_directory(h.appdir)
         num_rejected_classes = 0
         num_rejected_methods = 0
+        h.analyse_code()
         for rej in h.find_rejections():
             if len(rej) == 1:
                logger.debug("reject %s",rej[0])
