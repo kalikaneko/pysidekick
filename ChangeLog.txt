@@ -1,4 +1,9 @@
 
+v0.2.2:
+
+    * Hatchet:  cache build output, to avoid lots of recompilation when you
+      you change non-PySide-related parts of your app.
+
 v0.2.1:
 
     * Many fixes for the "Hatchet" module to make it build more reliably
