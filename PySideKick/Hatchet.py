@@ -73,8 +73,8 @@ from textwrap import dedent
 import PySideKick
 
 #  Download details for the latest PySide release.
-PYSIDE_SOURCE_MD5 = "cf54bc5eacc3132c2b720543fca9c83e"
-PYSIDE_SOURCE_URL = "http://www.pyside.org/files/pyside-qt4.7+1.0.0~rc1.tar.bz2"
+PYSIDE_SOURCE_MD5 = "5589a883cebcb799a48b184a46db6386"
+PYSIDE_SOURCE_URL = "http://www.pyside.org/files/pyside-qt4.7+1.0.0.tar.bz2"
 
 
 #  Name of file used to mark cached build directories
@@ -794,6 +794,16 @@ class Hatchet(object):
             if "CMAKE_INSTALL_PREFIX" in env:
                 cmd.append(
                    "-DCMAKE_INSTALL_PREFIX="+env["CMAKE_INSTALL_PREFIX"]
+                )
+            if "ALTERNATIVE_QT_INCLUDE_DIR" in env:
+                qt_include_dir = env["ALTERNATIVE_QT_INCLUDE_DIR"]
+                if qt_include_dir:
+                    cmd.append(
+                       "-DALTERNATIVE_QT_INCLUDE_DIR=" + qt_include_dir
+                    )
+            elif sys.platform == "darwin":
+                cmd.append(
+                   "-DALTERNATIVE_QT_INCLUDE_DIR=/Library/Frameworks"
                 )
             subprocess.check_call(cmd,env=env)
             #  The actual build program is "nmake" on win32

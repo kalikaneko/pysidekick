@@ -3,6 +3,9 @@ v0.2.2:
 
     * Hatchet:  cache build output, to avoid lots of recompilation when you
       you change non-PySide-related parts of your app.
+    * Hatchet:  make the OSX build chain more reliable, by setting the var
+      ALTERNATIVE_QT_INCLUDE_DIR to a sensible default and respecting any
+      value given in the environment.
 
 v0.2.1:
 
