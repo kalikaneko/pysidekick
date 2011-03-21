@@ -802,9 +802,10 @@ class Hatchet(object):
                        "-DALTERNATIVE_QT_INCLUDE_DIR=" + qt_include_dir
                     )
             elif sys.platform == "darwin":
-                cmd.append(
-                   "-DALTERNATIVE_QT_INCLUDE_DIR=/Library/Frameworks"
-                )
+                if os.path.exists("/Library/Frameworks/QtCore.framework"):
+                    cmd.append(
+                       "-DALTERNATIVE_QT_INCLUDE_DIR=/Library/Frameworks"
+                    )
             subprocess.check_call(cmd,env=env)
             #  The actual build program is "nmake" on win32
             if sys.platform == "win32":
