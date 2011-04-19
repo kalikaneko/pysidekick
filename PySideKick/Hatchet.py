@@ -849,9 +849,6 @@ class Hatchet(object):
         if "linux" in sys.platform:
             ldflags = env.get("LDFLAGS",os.environ.get("LDFLAGS",""))
             ldflags += " " + sysconfig.get_config_var("LDFLAGS")
-            #  These are required for static linking on linux
-            ldflags += " -lpthread -lrt -lz -ldl -lQtNetwork -lQtCore -ljpeg -ltiff -lpng14 -lz -lX11 -lXrender -lXrandr -lXext -lfontconfig -lSM -lICE"
-            ldflags += " --gc-sections"
             env["LDFLAGS"] = ldflags
         return env
 
