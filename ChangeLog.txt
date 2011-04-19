@@ -2,6 +2,8 @@
 v0.2.3:
 
     * Hatchet:  fix occasional erroring-out when using cached build dirs.
+    * Hatchet:  remove hacky hardcoded LDFLAGS on linux.  Just set what
+                you need in the environment.
 
 v0.2.2:
 
