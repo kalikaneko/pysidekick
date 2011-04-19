@@ -201,8 +201,13 @@ class Hatchet(object):
         try:
             self.logger.debug("building PySide in %r",builddir)
             if os.path.exists(os.path.join(builddir,BUILD_OK_MARKER)):
-                nm = os.listdir(builddir)[0]
-                sourcedir = os.path.join(builddir,nm)
+                for nm in os.listdir(builddir):
+                    if nm != BUILD_OK_MARKER:
+                       sourcedir = os.path.join(builddir,nm)
+                       break
+                else:
+                    msg = "Broken cached builddir: %s" % (builddir,)
+                    raise RuntimeError(msg)
                 self.logger.debug("using cached builddir: %r",sourcedir)
             else:
                 sourcefile = self.fetch_pyside_source()
