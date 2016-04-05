@@ -73,8 +73,8 @@ from textwrap import dedent
 import PySideKick
 
 #  Download details for the latest PySide release.
-PYSIDE_SOURCE_MD5 = "5589a883cebcb799a48b184a46db6386"
-PYSIDE_SOURCE_URL = "http://www.pyside.org/files/pyside-qt4.7+1.0.0.tar.bz2"
+PYSIDE_SOURCE_MD5 = "3cb7174c13bd45e3e8f77638926cb8c0"
+PYSIDE_SOURCE_URL = "https://pypi.python.org/packages/source/P/PySide/PySide-1.2.4.tar.gz"
 
 
 #  Name of file used to mark cached build directories
