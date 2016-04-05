@@ -1163,7 +1163,7 @@ class TypeDB(object):
         },
     }
 
-    def __init__(self,root_url="http://doc.qt.nokia.com/4.7/",logger=None):
+    def __init__(self,root_url="http://doc.qt.io/qt-4.8/", logger=None):
         if not root_url.endswith("/"):
             root_url += "/"
         self.root_url = root_url
