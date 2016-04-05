@@ -782,7 +782,7 @@ class Hatchet(object):
         """
         self.logger.info("building PySide in %r",sourcedir)
         olddir = os.getcwd()
-        os.chdir(sourcedir)
+        os.chdir(os.path.join(sourcedir, 'sources', 'pyside'))
         try:
             #  Here we have some more tricks for getting smaller binaries:
             #     * CMAKE_BUILD_TYPE=MinSizeRel, to enable -Os
