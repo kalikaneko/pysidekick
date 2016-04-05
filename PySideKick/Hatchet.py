@@ -1163,6 +1163,8 @@ class TypeDB(object):
         },
     }
 
+    visited = set()
+
     def __init__(self,root_url="http://doc.qt.io/qt-4.8/", logger=None):
         if not root_url.endswith("/"):
             root_url += "/"
@@ -1291,10 +1293,14 @@ class TypeDB(object):
 
     def superclasses(self,classnm):
         """Get all superclasses for a given class."""
+        if classnm in self.visited:
+            return
         yield classnm
+        self.visited.add(classnm)
         if classnm in self.MISSING_CLASSES:
             for bclassnm in self.MISSING_CLASSES[classnm]:
                 for sclassnm in self.superclasses(bclassnm):
+                    self.visited.add(sclassnm)
                     yield sclassnm
             return
         docstr = self._read_url(classnm.lower()+".html")
@@ -1302,8 +1308,10 @@ class TypeDB(object):
             ln = ln.strip()
             if "Inherits" in ln:
                 for supcls in self._get_linked_classes(ln):
-                    for cname in self._canonical_class_names(supcls):
+                    canonical = self._canonical_class_names(supcls)
+                    for cname in filter(lambda c: c not in self.visited, canonical):
                         for supsupcls in self.superclasses(cname):
+                            self.visited.add(supsupcls)
                             yield supsupcls
 
     def itermethods(self,classnm):
