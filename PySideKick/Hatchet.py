@@ -614,6 +614,8 @@ class Hatchet(object):
                                                       num_rejected_methods)
         #  Find each top-level module directory and patch the contained files.
         psdir = os.path.join(sourcedir,"PySide")
+        if not os.path.isdir(psdir):
+            os.makedirs(psdir)
         moddirs = []
         for modnm in os.listdir(psdir):
             if not modnm.startswith("Qt") and not modnm == "phonon":
