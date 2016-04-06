@@ -225,7 +225,8 @@ class Hatchet(object):
             raise
         finally:
             if remove_builddir:
-                shutil.rmtree(builddir)
+                pass
+                #shutil.rmtree(builddir)
 
     def add_script(self,pathname,follow_imports=True):
         """Add an additional script for the frozen application.
@@ -595,6 +596,7 @@ class Hatchet(object):
             * removing <class>_wrapper.cpp entries from the makefiles
 
         """
+        sourcedir =  os.path.join(sourcedir, 'sources', 'pyside')
         self.logger.info("hacking PySide sources in %r",sourcedir)
         logger = self.logger
         #  Find all rejections and store them for quick reference.
@@ -711,6 +713,7 @@ class Hatchet(object):
                                 yield ln
                     logger.debug("module empty, not building: %s",modnm)
                     self.patch_file(dont_build_module,psdir,"CMakeLists.txt")
+        #import ipdb; ipdb.set_trace()
 
     def patch_file(self,patchfunc,*paths):
         """Patch the given file by applying a line-filtering function.
@@ -740,7 +743,7 @@ class Hatchet(object):
             os.unlink(tf)
             raise
         else:
-            os.rename(tf,filepath)
+            shutil.move(tf,filepath)
 
     def patch_xml_file(self,patchfunc,*paths):
         """Patch the given file by applying an xml-filtering function.
@@ -755,7 +758,11 @@ class Hatchet(object):
         self.logger.debug("patching file %r",filepath)
         mod = os.stat(filepath).st_mode
         with open(filepath,"rt") as fIn:
-            xml = minidom.parse(fIn)
+            try:
+                xml = minidom.parse(fIn)
+            except Exception:
+                self.logger.error("Error patching %r", filepath)
+                return
         xml = patchfunc(xml)
         (fd,tf) = tempfile.mkstemp()
         try:
@@ -771,7 +778,7 @@ class Hatchet(object):
             os.unlink(tf)
             raise
         else:
-            os.rename(tf,filepath)
+            shutil.move(tf, filepath)
 
     def build_pyside_source(self,sourcedir):
         """Build the PySide sources in the given directory.
@@ -782,7 +789,47 @@ class Hatchet(object):
         """
         self.logger.info("building PySide in %r",sourcedir)
         olddir = os.getcwd()
-        os.chdir(os.path.join(sourcedir, 'sources', 'pyside'))
+
+        # Compile Shiboken, unless skipped.
+        DO_SHIBOKEN = os.environ.get('DO_SHIBOKEN', True)
+        if DO_SHIBOKEN:
+            shiboken_build = os.path.join(sourcedir, 'sources', 'shiboken', 'build')
+            os.makedirs(shiboken_build)
+            os.chdir(shiboken_build)
+            try:
+                env = os.environ.copy()
+                env = self.get_build_env(env)
+                cmd = ["cmake",
+                       "-DCMAKE_BUILD_TYPE=MinSizeRel",
+                       "-DCMAKE_VERBOSE_MAKEFILE=ON",
+                       "-DBUILD_TESTS=False",
+                       "-DPYTHON_EXECUTABLE="+sys.executable,
+                       "-DPYTHON_INCLUDE_DIR="+sysconfig.get_python_inc(),
+                       "-DDISABLE_DOCSTRINGS=True",
+                       "-DCMAKE_INSTALL_PREFIX="+env["CMAKE_INSTALL_PREFIX"],
+                       "-DCMAKE_INSTALL_RPATH_USE_LINK_PATH=yes",
+                ]
+                cmd.append('..')
+                subprocess.check_call(cmd,env=env)
+                #  The actual build program is "nmake" on win32
+                if sys.platform == "win32":
+                    cmd = ["nmake"]
+                else:
+                    cmd = ["make", "-j", "2"]
+                subprocess.check_call(cmd,env=env)
+                cmd = ["make", "install"]
+                subprocess.check_call(cmd,env=env)
+
+            except Exception:
+                import ipdb; ipdb.set_trace()
+            finally:
+                os.chdir(olddir)
+
+
+        pyside_build = os.path.join(sourcedir, 'sources', 'pyside', 'build')
+        os.makedirs(pyside_build)
+        os.chdir(pyside_build)
+        #import ipdb; ipdb.set_trace()
         try:
             #  Here we have some more tricks for getting smaller binaries:
             #     * CMAKE_BUILD_TYPE=MinSizeRel, to enable -Os
@@ -813,6 +860,7 @@ class Hatchet(object):
                     cmd.append(
                        "-DALTERNATIVE_QT_INCLUDE_DIR=/Library/Frameworks"
                     )
+            cmd.append('..')
             subprocess.check_call(cmd,env=env)
             #  The actual build program is "nmake" on win32
             if sys.platform == "win32":
